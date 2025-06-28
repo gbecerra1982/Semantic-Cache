@@ -191,23 +191,102 @@ response = call_gpt_with_cache(prompt, chat_client, cache, config)
    - "Contoso Chat API"
 3. **Click** en la API para seleccionarla
 
-**Opción B: Si necesitas importar la API**
+**Opción B: Importar desde Azure AI Foundry (RECOMENDADO)**
 
-1. En la sección APIs, click en **"+ Add API"**
-2. Selecciona **"OpenAPI"** (el tile con el logo de OpenAPI)
-3. En el formulario que aparece:
+Según la [documentación oficial de Microsoft](https://learn.microsoft.com/en-us/azure/api-management/azure-ai-foundry-api), la mejor forma es:
+
+1. **En Azure AI Foundry Studio**:
+   - Ve a [AI Foundry Studio](https://ai.azure.com)
+   - Selecciona tu proyecto
+   - En el menú lateral, ve a **"Management"** → **"API access"**
+   - Click en **"Deploy to API Management"**
+
+2. **Configuración del despliegue**:
+   - **API Management instance**: Selecciona `apim0-m5gd7y67cu5b6`
+   - **API name**: Azure AI Foundry API
+   - **API URL suffix**: ai-foundry
+   - **Products**: Selecciona los productos que quieras
+   - Click **"Deploy"**
+
+3. **Esto automáticamente**:
+   - Importa todas las operaciones de OpenAI
+   - Configura la autenticación correctamente
+   - Agrega las transformaciones necesarias
+
+**Opción C: Importar manualmente desde OpenAPI Specification**
+
+Si prefieres importar manualmente:
+
+1. En API Management, click en **"+ Add API"**
+2. Selecciona **"OpenAPI"** 
+3. Click en **"Full"** en la parte superior
+4. Completa el formulario:
    
-   **From URL**:
-   - **OpenAPI specification**: 
+   **Create from OpenAPI specification**:
+   - **Select a file**: Descarga primero el archivo JSON desde:
      ```
-     https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-02-01/inference.json
+     https://github.com/Azure/azure-rest-api-specs/blob/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-02-01/inference.json
      ```
+   - O usa **"From URL"** con esta URL directa:
+     ```
+     https://github.com/Azure/azure-rest-api-specs/raw/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-02-01/inference.json
+     ```
+   
+   **API Settings**:
    - **Display name**: Azure OpenAI Service API
    - **Name**: azure-openai-api
+   - **URL scheme**: HTTPS
    - **API URL suffix**: openai
-   - **Subscription required**: ✓ (marcado)
+   - **Base URL**: `https://foundry-proyecto1.openai.azure.com/openai`
+   - **Products**: Selecciona los productos aplicables
 
-4. Click **"Create"**
+5. Click **"Create"**
+
+**Opción D: Usar la API Template de Azure**
+
+1. En API Management, click en **"+ Add API"**
+2. En lugar de OpenAPI, selecciona **"Azure AI services"**
+3. Verás opciones preconfiguradas:
+   - **Azure OpenAI Service**
+   - **Azure AI Search**
+   - **Azure AI Document Intelligence**
+4. Selecciona **"Azure OpenAI Service"**
+5. Configura:
+   - **Service URL**: `https://foundry-proyecto1.openai.azure.com`
+   - **API URL suffix**: openai
+   - **Subscription required**: ✓
+
+### 🔧 Configuración Post-Importación
+
+Una vez importada la API, necesitas configurar el backend:
+
+1. **Selecciona tu API** → Click en **"Settings"**
+2. En **"Web service URL"**, asegúrate que sea:
+   ```
+   https://foundry-proyecto1.openai.azure.com/openai
+   ```
+3. En **"HTTP(s) endpoint"**:
+   - **Override**: ✓
+   - **Service URL**: `https://foundry-proyecto1.openai.azure.com/openai`
+
+4. **Headers de seguridad**:
+   - Click en **"+ Add header"**
+   - **Name**: `api-key`
+   - **Value**: `{{foundry-api-key}}` (la Named Value que crearemos después)
+
+5. Click **"Save"**
+
+### ✅ Verificar la importación
+
+1. En tu API, deberías ver operaciones como:
+   - `POST /deployments/{deployment-id}/completions`
+   - `POST /deployments/{deployment-id}/chat/completions`
+   - `POST /deployments/{deployment-id}/embeddings`
+
+2. Si no ves estas operaciones, verifica:
+   - Que la URL de importación sea correcta
+   - Que tengas permisos en el API Management
+   - Intenta descargar el JSON y subirlo manualmente
 
 #### 3. **Configurar la Política Global (All Operations)**
 
