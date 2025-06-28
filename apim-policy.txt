@@ -1,0 +1,134 @@
+<policies>
+    <inbound>
+        <base />
+        <!-- Configurar backend principal -->
+        <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
+        <!-- Determinar tipo de operación y guardar en variables -->
+        <set-variable name="operation-type" value="@{
+            var path = context.Request.Url.Path;
+            if (path.Contains(&quot;/embeddings&quot;)) { return &quot;embeddings&quot;; }
+            if (path.Contains(&quot;/chat/completions&quot;)) { return &quot;chat&quot;; }
+            if (path.Contains(&quot;/completions&quot;)) { return &quot;completions&quot;; }
+            return &quot;other&quot;;
+        }" />
+        <!-- Cache Semántico único con configuración conservadora -->
+        <azure-openai-semantic-cache-lookup score-threshold="0.80" embeddings-backend-id="AI-SC-text-embedding-umvu26xc5pb6hl1" embeddings-backend-auth="system-assigned" max-message-count="10">
+            <!-- Vary by subscription -->
+            <vary-by>@(context.Subscription?.Id ?? "default")</vary-by>
+            <!-- Vary by deployment -->
+            <vary-by>@(context.Request.MatchedParameters["deployment-id"])</vary-by>
+            <!-- Vary by operation type para separar caches -->
+            <vary-by>@(context.Variables.GetValueOrDefault("operation-type", "other"))</vary-by>
+            <!-- Vary by parámetros específicos del request -->
+            <vary-by>@{
+                var body = context.Request.Body.As<JObject>(preserveContent: true);
+                var opType = context.Variables.GetValueOrDefault("operation-type", "other");
+                
+                if (opType == "embeddings") {
+                    var inputType = body["input_type"]?.ToString() ?? "query";
+                    var dimensions = body["dimensions"]?.ToString() ?? "3072";
+                    return $"emb|type:{inputType}|dim:{dimensions}";
+                }
+                else if (opType == "chat" || opType == "completions") {
+                    var temp = body["temperature"]?.Value<float>() ?? 1.0f;
+                    var maxTokens = body["max_tokens"]?.Value<int>() ?? 100;
+                    var tempGroup = temp <= 0.3 ? "low" : (temp <= 0.7 ? "medium" : "high");
+                    var model = body["model"]?.ToString() ?? "default";
+                    return $"{opType}|temp:{tempGroup}|max:{maxTokens}|model:{model}";
+                }
+                
+                return $"{opType}|default";
+            }</vary-by>
+            <!-- Vary by user si existe -->
+            <vary-by>@{
+                var body = context.Request.Body.As<JObject>(preserveContent: true);
+                var user = body["user"]?.ToString();
+                return !string.IsNullOrEmpty(user) ? $"user:{user}" : "anonymous";
+            }</vary-by>
+        </azure-openai-semantic-cache-lookup>
+        <!-- Headers de debugging -->
+        <set-header name="X-Cache-Operation" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault("operation-type", "unknown"))</value>
+        </set-header>
+        <set-header name="X-Cache-Applied-Threshold" exists-action="override">
+            <value>0.80</value>
+        </set-header>
+        <set-header name="X-Cache-Recommended-Threshold" exists-action="override">
+            <value>@{
+                var opType = context.Variables.GetValueOrDefault("operation-type", "");
+                switch (opType)
+                {
+                    case "embeddings": return "0.95";
+                    case "chat": return "0.80";
+                    case "completions": return "0.85";
+                    default: return "0.90";
+                }
+            }</value>
+        </set-header>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <!-- Store en cache solo si la respuesta es exitosa -->
+        <choose>
+            <when condition="@(context.Response.StatusCode == 200)">
+                <!-- Una única política de cache store con duración fija -->
+                <azure-openai-semantic-cache-store duration="7200" />
+            </when>
+        </choose>
+        <!-- Headers informativos -->
+        <set-header name="X-Semantic-Cache-Status" exists-action="override">
+            <value>@{
+                var status = context.Variables.GetValueOrDefault("semantic-cache-lookup-status", "none");
+                return status.ToString().ToUpper();
+            }</value>
+        </set-header>
+        <set-header name="X-Semantic-Cache-Score" exists-action="override">
+            <value>@{
+                var status = context.Variables.GetValueOrDefault("semantic-cache-lookup-status", "none");
+                if (status.ToString() == "hit") {
+                    var score = context.Variables.GetValueOrDefault("semantic-cache-lookup-score", "0");
+                    return score.ToString();
+                }
+                return "N/A";
+            }</value>
+        </set-header>
+        <set-header name="X-Cache-TTL-Hours" exists-action="override">
+            <value>2</value>
+        </set-header>
+        <set-header name="X-Cache-Recommended-TTL-Hours" exists-action="override">
+            <value>@{
+                var opType = context.Variables.GetValueOrDefault("operation-type", "");
+                switch (opType)
+                {
+                    case "embeddings": return "24";
+                    case "chat": return "1";
+                    case "completions": return "2";
+                    default: return "1";
+                }
+            }</value>
+        </set-header>
+        <set-header name="X-Response-Time-Ms" exists-action="override">
+            <value>@(context.Elapsed.TotalMilliseconds.ToString("F0"))</value>
+        </set-header>
+        <set-header name="X-Cache-Key-Info" exists-action="override">
+            <value>@{
+                var opType = context.Variables.GetValueOrDefault("operation-type", "");
+                var subId = context.Subscription?.Id ?? "default";
+                var deploymentId = context.Request.MatchedParameters["deployment-id"];
+                return $"op:{opType}|sub:{subId}|dep:{deploymentId}";
+            }</value>
+        </set-header>
+    </outbound>
+    <on-error>
+        <base />
+        <set-header name="X-Error-Message" exists-action="override">
+            <value>@(context.LastError?.Message ?? "Unknown error")</value>
+        </set-header>
+        <set-header name="X-Error-Source" exists-action="override">
+            <value>@(context.LastError?.Source ?? "Unknown")</value>
+        </set-header>
+    </on-error>
+</policies>
