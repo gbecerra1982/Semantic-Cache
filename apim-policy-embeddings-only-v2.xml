@@ -1,0 +1,236 @@
+<policies>
+    <inbound>
+        <base />
+        
+        <!-- Configurar el backend para embeddings -->
+        <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
+        
+        <!-- Extraer y validar el request body -->
+        <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
+        
+        <!-- Extraer parámetros específicos de embeddings -->
+        <set-variable name="input-type" value="@{
+            var body = (JObject)context.Variables[&quot;requestBody&quot;];
+            return body[&quot;input_type&quot;]?.ToString() ?? &quot;query&quot;;
+        }" />
+        
+        <set-variable name="dimensions" value="@{
+            var body = (JObject)context.Variables[&quot;requestBody&quot;];
+            return body[&quot;dimensions&quot;]?.ToString() ?? &quot;3072&quot;;
+        }" />
+        
+        <set-variable name="model" value="@{
+            var body = (JObject)context.Variables[&quot;requestBody&quot;];
+            return body[&quot;model&quot;]?.ToString() ?? &quot;text-embedding-3-large&quot;;
+        }" />
+        
+        <set-variable name="user" value="@{
+            var body = (JObject)context.Variables[&quot;requestBody&quot;];
+            return body[&quot;user&quot;]?.ToString() ?? &quot;anonymous&quot;;
+        }" />
+        
+        <!-- Caché Semántico Optimizado para Embeddings -->
+        <!-- score-threshold: 0.95 para coincidencias casi exactas -->
+        <azure-openai-semantic-cache-lookup 
+            score-threshold="0.95"
+            embeddings-backend-id="text-embedding-3-large" 
+            embeddings-backend-auth="system-assigned" 
+            max-message-count="1"
+            ignore-system-messages="true">
+            
+            <!-- Particionamiento principal por suscripción -->
+            <vary-by>@(context.Subscription?.Id ?? &quot;public&quot;)</vary-by>
+            
+            <!-- Particionamiento por deployment -->
+            <vary-by>@(context.Request.MatchedParameters[&quot;deployment-id&quot;])</vary-by>
+            
+            <!-- Particionamiento por modelo (si se especifica) -->
+            <vary-by>@(context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;text-embedding-3-large&quot;))</vary-by>
+            
+            <!-- Particionamiento por tipo de input (query/document/passage) -->
+            <vary-by>@(context.Variables.GetValueOrDefault(&quot;input-type&quot;, &quot;query&quot;))</vary-by>
+            
+            <!-- Particionamiento por dimensiones -->
+            <vary-by>@(context.Variables.GetValueOrDefault(&quot;dimensions&quot;, &quot;3072&quot;))</vary-by>
+            
+            <!-- Particionamiento por usuario (si se proporciona) -->
+            <vary-by>@(context.Variables.GetValueOrDefault(&quot;user&quot;, &quot;anonymous&quot;))</vary-by>
+            
+            <!-- Hash exacto del input para máxima precisión -->
+            <vary-by>@{
+                var body = (JObject)context.Variables[&quot;requestBody&quot;];
+                var input = body[&quot;input&quot;];
+                
+                if (input != null) {
+                    // Para strings simples
+                    if (input.Type == JTokenType.String) {
+                        var text = input.ToString();
+                        return $&quot;single:{text.GetHashCode()}&quot;;
+                    }
+                    // Para arrays (batch embeddings)
+                    else if (input.Type == JTokenType.Array) {
+                        var array = (JArray)input;
+                        var combinedHash = string.Join(&quot;|&quot;, array.Select(i => i.ToString().GetHashCode()));
+                        return $&quot;batch:{array.Count}:{combinedHash.GetHashCode()}&quot;;
+                    }
+                }
+                return &quot;empty-input&quot;;
+            }</vary-by>
+            
+            <!-- Metadata adicional si existe -->
+            <vary-by>@{
+                var body = (JObject)context.Variables[&quot;requestBody&quot;];
+                var metadata = body[&quot;metadata&quot;];
+                if (metadata != null) {
+                    return $&quot;meta:{metadata.ToString().GetHashCode()}&quot;;
+                }
+                return &quot;&quot;;
+            }</vary-by>
+        </azure-openai-semantic-cache-lookup>
+        
+        <!-- Headers de debugging para embeddings -->
+        <set-header name="X-Embedding-Model" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;text-embedding-3-large&quot;))</value>
+        </set-header>
+        
+        <set-header name="X-Embedding-Type" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault(&quot;input-type&quot;, &quot;query&quot;))</value>
+        </set-header>
+        
+        <set-header name="X-Embedding-Dimensions" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault(&quot;dimensions&quot;, &quot;3072&quot;))</value>
+        </set-header>
+        
+        <set-header name="X-Embedding-User" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault(&quot;user&quot;, &quot;anonymous&quot;))</value>
+        </set-header>
+    </inbound>
+    
+    <backend>
+        <base />
+    </backend>
+    
+    <outbound>
+        <base />
+        
+        <!-- Almacenar respuestas exitosas con TTL largo para embeddings -->
+        <choose>
+            <when condition="@(context.Response.StatusCode == 200)">
+                <!-- 30 días (2592000 segundos) como TTL por defecto para embeddings -->
+                <azure-openai-semantic-cache-store duration="2592000" />
+            </when>
+        </choose>
+        
+        <!-- Headers de respuesta para monitoreo de caché -->
+        <set-header name="X-Semantic-Cache-Status" exists-action="override">
+            <value>@{
+                var status = context.Variables.GetValueOrDefault(&quot;semantic-cache-lookup-status&quot;, &quot;none&quot;);
+                return status.ToString().ToUpper();
+            }</value>
+        </set-header>
+        
+        <set-header name="X-Semantic-Cache-Score" exists-action="override">
+            <value>@{
+                var status = context.Variables.GetValueOrDefault(&quot;semantic-cache-lookup-status&quot;, &quot;none&quot;);
+                if (status.ToString().ToLower() == &quot;hit&quot;) {
+                    var score = context.Variables.GetValueOrDefault(&quot;semantic-cache-lookup-score&quot;, &quot;0&quot;);
+                    return score.ToString();
+                }
+                return &quot;N/A&quot;;
+            }</value>
+        </set-header>
+        
+        <!-- TTL en días para información -->
+        <set-header name="X-Cache-TTL-Days" exists-action="override">
+            <value>30</value>
+        </set-header>
+        
+        <!-- Tiempo de respuesta -->
+        <set-header name="X-Response-Time-Ms" exists-action="override">
+            <value>@(context.Elapsed.TotalMilliseconds.ToString(&quot;F0&quot;))</value>
+        </set-header>
+        
+        <!-- Información de la clave de caché -->
+        <set-header name="X-Cache-Key" exists-action="override">
+            <value>@{
+                var deployment = context.Request.MatchedParameters[&quot;deployment-id&quot;];
+                var inputType = context.Variables.GetValueOrDefault(&quot;input-type&quot;, &quot;query&quot;);
+                var dimensions = context.Variables.GetValueOrDefault(&quot;dimensions&quot;, &quot;3072&quot;);
+                var user = context.Variables.GetValueOrDefault(&quot;user&quot;, &quot;anonymous&quot;);
+                return $&quot;emb:{deployment}|type:{inputType}|dim:{dimensions}|user:{user}&quot;;
+            }</value>
+        </set-header>
+        
+        <!-- Estadísticas de batch si aplica -->
+        <choose>
+            <when condition="@{
+                var body = (JObject)context.Variables[&quot;requestBody&quot;];
+                var input = body[&quot;input&quot;];
+                return input != null &amp;&amp; input.Type == JTokenType.Array;
+            }">
+                <set-header name="X-Batch-Size" exists-action="override">
+                    <value>@{
+                        var body = (JObject)context.Variables[&quot;requestBody&quot;];
+                        var input = body[&quot;input&quot;] as JArray;
+                        return input?.Count.ToString() ?? &quot;0&quot;;
+                    }</value>
+                </set-header>
+            </when>
+        </choose>
+        
+        <!-- Recomendaciones de optimización -->
+        <set-header name="X-Cache-Optimization-Tip" exists-action="override">
+            <value>@{
+                var status = context.Variables.GetValueOrDefault(&quot;semantic-cache-lookup-status&quot;, &quot;none&quot;);
+                var inputType = context.Variables.GetValueOrDefault(&quot;input-type&quot;, &quot;query&quot;);
+                
+                if (status.ToString().ToLower() == &quot;miss&quot;) {
+                    if (inputType == &quot;query&quot;) {
+                        return &quot;Consider normalizing query text (lowercase, trim) for better cache hits&quot;;
+                    } else if (inputType == &quot;document&quot;) {
+                        return &quot;Document embeddings are cached for 30 days - ideal for knowledge bases&quot;;
+                    } else if (inputType == &quot;passage&quot;) {
+                        return &quot;Passage embeddings are cached for 30 days - perfect for RAG systems&quot;;
+                    }
+                    return &quot;Embeddings are cached for 30 days with 0.95 similarity threshold&quot;;
+                }
+                else if (status.ToString().ToLower() == &quot;hit&quot;) {
+                    var score = context.Variables.GetValueOrDefault(&quot;semantic-cache-lookup-score&quot;, &quot;0&quot;);
+                    return $&quot;Cache hit with score {score} - Embedding computation saved&quot;;
+                }
+                
+                return &quot;Use input_type field (query/document/passage) for better cache partitioning&quot;;
+            }</value>
+        </set-header>
+        
+        <!-- Información adicional sobre el modelo -->
+        <set-header name="X-Embedding-Info" exists-action="override">
+            <value>@{
+                var model = context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;text-embedding-3-large&quot;);
+                var dimensions = context.Variables.GetValueOrDefault(&quot;dimensions&quot;, &quot;3072&quot;);
+                return $&quot;Model: {model}, Dimensions: {dimensions}, TTL: 30 days&quot;;
+            }</value>
+        </set-header>
+    </outbound>
+    
+    <on-error>
+        <base />
+        
+        <!-- Headers de error específicos para embeddings -->
+        <set-header name="X-Error-Message" exists-action="override">
+            <value>@(context.LastError?.Message ?? &quot;Unknown error&quot;)</value>
+        </set-header>
+        
+        <set-header name="X-Error-Source" exists-action="override">
+            <value>@(context.LastError?.Source ?? &quot;Unknown&quot;)</value>
+        </set-header>
+        
+        <set-header name="X-Error-Input-Type" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault(&quot;input-type&quot;, &quot;unknown&quot;))</value>
+        </set-header>
+        
+        <set-header name="X-Error-Dimensions" exists-action="override">
+            <value>@(context.Variables.GetValueOrDefault(&quot;dimensions&quot;, &quot;unknown&quot;))</value>
+        </set-header>
+    </on-error>
+</policies>
