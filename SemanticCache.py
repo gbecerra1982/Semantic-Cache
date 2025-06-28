@@ -1,449 +1,659 @@
 import os
 import time
 import json
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+import hashlib
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple, Union
 import numpy as np
 from openai import AzureOpenAI
-from azure.ai.inference import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
+from azure.ai.inference import EmbeddingsClient
 from azure.core.credentials import AzureKeyCredential
+from azure.identity import DefaultAzureCredential
 import faiss
 import pickle
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-# Función para solicitar parámetros
-def get_parameters():
-    """Solicita los parámetros de configuración con valores predeterminados."""
-    print("🔧 CONFIGURACIÓN DE AZURE AI FOUNDRY")
-    print("=" * 60)
-    print("Presiona Enter para usar los valores predeterminados\n")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configuration constants
+CACHE_FILE = "embedding_cache.pkl"
+INDEX_FILE = "embedding_index.faiss"
+BATCH_CACHE_FILE = "embedding_batch_cache.pkl"
+
+class InputType(Enum):
+    """Types of embedding inputs as per OpenAI API"""
+    QUERY = "query"
+    DOCUMENT = "document"
+    PASSAGE = "passage"
     
-    # SDK a usar
-    print("Selecciona el SDK a usar:")
-    print("1. Azure OpenAI SDK con endpoint de OpenAI (predeterminado)")
-    print("2. Azure OpenAI SDK con endpoint de Foundry")
-    print("3. Azure AI Foundry SDK (experimental)")
-    sdk_choice = input("Opción [1]: ").strip() or "1"
+class EncodingFormat(Enum):
+    """Encoding formats for embeddings"""
+    FLOAT = "float"
+    BASE64 = "base64"
+
+@dataclass
+class EmbeddingCacheConfig:
+    """Configuration optimized for embedding caching"""
+    endpoint: str
+    api_key: Optional[str] = None
+    use_managed_identity: bool = False
+    embedding_deployment: str = "text-embedding-3-large"
+    api_version: str = "2024-02-01"
     
-    if sdk_choice == "3":
-        # Configuración para Azure AI Foundry SDK
-        endpoint = input(f"Azure AI Foundry endpoint [{DEFAULT_FOUNDRY_ENDPOINT}]: ").strip() or DEFAULT_FOUNDRY_ENDPOINT
-        api_key = input(f"API Key [{DEFAULT_API_KEY[:20]}...]: ").strip() or DEFAULT_API_KEY
-        
-        # Deployment names para Foundry
-        gpt_deployment = input(f"GPT Deployment name [{DEFAULT_GPT_DEPLOYMENT}]: ").strip() or DEFAULT_GPT_DEPLOYMENT
-        embedding_deployment = input(f"Embedding Deployment name [{DEFAULT_EMBEDDING_DEPLOYMENT}]: ").strip() or DEFAULT_EMBEDDING_DEPLOYMENT
-        
-        return {
-            'use_foundry': True,
-            'endpoint': endpoint,
-            'api_key': api_key,
-            'gpt_deployment': gpt_deployment,
-            'embedding_deployment': embedding_deployment,
-            'api_version': None
-        }
-    elif sdk_choice == "2":
-        # Configuración para Azure OpenAI SDK con endpoint de Foundry
-        endpoint = input(f"Azure OpenAI endpoint [{DEFAULT_OPENAI_ENDPOINT}]: ").strip() or DEFAULT_OPENAI_ENDPOINT
-        api_key = input(f"API Key [{DEFAULT_API_KEY[:20]}...]: ").strip() or DEFAULT_API_KEY
-        api_version = input(f"API Version [{DEFAULT_API_VERSION}]: ").strip() or DEFAULT_API_VERSION
-        
-        # Deployment names
-        gpt_deployment = input(f"GPT Deployment name [{DEFAULT_GPT_DEPLOYMENT}]: ").strip() or DEFAULT_GPT_DEPLOYMENT
-        embedding_deployment = input(f"Embedding Deployment name [{DEFAULT_EMBEDDING_DEPLOYMENT}]: ").strip() or DEFAULT_EMBEDDING_DEPLOYMENT
-        
-        return {
-            'use_foundry': False,
-            'endpoint': endpoint,
-            'api_key': api_key,
-            'gpt_deployment': gpt_deployment,
-            'embedding_deployment': embedding_deployment,
-            'api_version': api_version
-        }
-    else:
-        # Configuración estándar para Azure OpenAI
-        endpoint = input(f"Azure OpenAI endpoint [Tu endpoint]: ").strip()
-        api_key = input(f"API Key: ").strip()
-        api_version = input(f"API Version [{DEFAULT_API_VERSION}]: ").strip() or DEFAULT_API_VERSION
-        
-        # Deployment names
-        gpt_deployment = input(f"GPT Deployment name [{DEFAULT_GPT_DEPLOYMENT}]: ").strip() or DEFAULT_GPT_DEPLOYMENT
-        embedding_deployment = input(f"Embedding Deployment name [{DEFAULT_EMBEDDING_DEPLOYMENT}]: ").strip() or DEFAULT_EMBEDDING_DEPLOYMENT
-        
-        return {
-            'use_foundry': False,
-            'endpoint': endpoint,
-            'api_key': api_key,
-            'gpt_deployment': gpt_deployment,
-            'embedding_deployment': embedding_deployment,
-            'api_version': api_version
-        }
+    # Embedding-specific settings
+    default_dimensions: int = 3072  # text-embedding-3-large default
+    similarity_threshold_embeddings: float = 0.95  # High threshold for exact matches
+    similarity_threshold_other: float = 0.10  # Lower for semantic similarity
+    
+    # Cache TTL settings (in hours)
+    ttl_query_embeddings: int = 168  # 7 days for queries
+    ttl_document_embeddings: int = 336  # 14 days for documents
+    ttl_passage_embeddings: int = 336  # 14 days for passages
+    ttl_other: int = 24  # 1 day for other operations
+    
+    # Performance settings
+    batch_size: int = 100  # Max batch size for embeddings
+    max_cache_size_gb: float = 10.0  # Maximum cache size
+    enable_compression: bool = True  # Compress cached embeddings
+    
+    @classmethod
+    def from_environment(cls):
+        """Create configuration from environment variables"""
+        return cls(
+            endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT", ""),
+            api_key=os.environ.get("AZURE_OPENAI_KEY"),
+            use_managed_identity=os.environ.get("USE_MANAGED_IDENTITY", "false").lower() == "true",
+            embedding_deployment=os.environ.get("EMBEDDING_DEPLOYMENT", "text-embedding-3-large"),
+            api_version=os.environ.get("API_VERSION", "2024-02-01"),
+            default_dimensions=int(os.environ.get("EMBEDDING_DIMENSIONS", "3072")),
+            batch_size=int(os.environ.get("EMBEDDING_BATCH_SIZE", "100"))
+        )
 
-# Valores predeterminados
-DEFAULT_FOUNDRY_ENDPOINT = "https://foundry-proyecto1.services.ai.azure.com/api/projects/myFirstProject"
-DEFAULT_OPENAI_ENDPOINT = "https://foundry-proyecto1.openai.azure.com/"
-DEFAULT_API_KEY = "44E5Jtv6MfBOtx7565zFDoGXV8hTHeUrokBk7DdArzC69NAFC7ZxJQQJ99BFAC4f1cMXJ3w3AAAAACOGVYsT"
-DEFAULT_API_VERSION = "2024-02-01"
-DEFAULT_GPT_DEPLOYMENT = "gpt-4.1"
-DEFAULT_EMBEDDING_DEPLOYMENT = "text-embedding"
+@dataclass
+class EmbeddingRequest:
+    """Structured embedding request"""
+    input: Union[str, List[str]]
+    input_type: InputType = InputType.QUERY
+    dimensions: Optional[int] = None
+    encoding_format: EncodingFormat = EncodingFormat.FLOAT
+    user: Optional[str] = None
+    metadata: Optional[Dict] = None
+    
+    def cache_key(self) -> str:
+        """Generate a unique cache key for this request"""
+        key_parts = []
+        
+        # Handle single or batch input
+        if isinstance(self.input, str):
+            key_parts.append(hashlib.sha256(self.input.encode()).hexdigest()[:16])
+        else:
+            # For batch, create hash of all inputs
+            batch_hash = hashlib.sha256(
+                "|".join(self.input).encode()
+            ).hexdigest()[:16]
+            key_parts.append(f"batch_{len(self.input)}_{batch_hash}")
+        
+        key_parts.extend([
+            self.input_type.value,
+            str(self.dimensions or "default"),
+            self.encoding_format.value,
+            self.user or "anonymous"
+        ])
+        
+        if self.metadata:
+            metadata_hash = hashlib.sha256(
+                json.dumps(self.metadata, sort_keys=True).encode()
+            ).hexdigest()[:8]
+            key_parts.append(metadata_hash)
+        
+        return "|".join(key_parts)
 
-# Configuración de caché
-CACHE_FILE = "semantic_cache.pkl"
-INDEX_FILE = "semantic_index.faiss"
-SIMILARITY_THRESHOLD = 0.85  # Umbral de similitud para considerar un hit de caché
-
-class SemanticCache:
-    def __init__(self, embedding_dimension: int = None, config: Dict = None):
-        """Inicializa la caché semántica con FAISS."""
-        self.embedding_dimension = embedding_dimension
-        self.index = None  # Se inicializará después de conocer la dimensión
-        self.cache: Dict[int, Dict] = {}
-        self.cache_hits = 0
-        self.cache_misses = 0
-        self.config = config or {}
+class EmbeddingSemanticCache:
+    """Semantic cache optimized for embedding operations"""
+    
+    def __init__(self, config: EmbeddingCacheConfig):
+        self.config = config
+        self.embedding_dimension = config.default_dimensions
+        self.index = None
+        self.cache: Dict[str, Dict] = {}  # Using string keys for better tracking
+        self.batch_cache: Dict[str, List[List[float]]] = {}  # Cache for batch embeddings
+        self.stats = {
+            "embedding_hits": 0,
+            "embedding_misses": 0,
+            "batch_hits": 0,
+            "batch_misses": 0,
+            "other_hits": 0,
+            "other_misses": 0,
+            "total_tokens_saved": 0
+        }
         self._initialized = False
+        self.executor = ThreadPoolExecutor(max_workers=4)
         
     def _initialize_index(self, dimension: int):
-        """Inicializa el índice FAISS con la dimensión correcta."""
+        """Initialize FAISS index optimized for embeddings"""
         if not self._initialized:
             self.embedding_dimension = dimension
-            self.index = faiss.IndexFlatL2(dimension)
-            self._initialized = True
-            print(f"📏 Índice inicializado con dimensión: {dimension}")
-    
-    def get_embedding(self, text: str, client) -> List[float]:
-        """Genera el embedding para un texto usando Azure OpenAI o Foundry."""
-        if self.config.get('use_foundry'):
-            # Para Foundry, necesitamos usar el cliente de embeddings específico
-            # Por ahora, usaremos el cliente OpenAI ya que Foundry usa la misma API
-            if hasattr(client, 'embeddings'):
-                response = client.embeddings.create(
-                    model=self.config['embedding_deployment'],
-                    input=text
-                )
-            else:
-                # Si es el cliente de Foundry ChatCompletions, crear uno de OpenAI para embeddings
-                openai_client = AzureOpenAI(
-                    azure_endpoint=self.config['endpoint'].replace('/api/projects/myFirstProject', ''),
-                    api_key=self.config['api_key'],
-                    api_version="2024-02-01"
-                )
-                response = openai_client.embeddings.create(
-                    model=self.config['embedding_deployment'],
-                    input=text
-                )
-        else:
-            response = client.embeddings.create(
-                model=self.config['embedding_deployment'],
-                input=text
-            )
-        
-        embedding = response.data[0].embedding
-        
-        # Inicializar el índice si es necesario
-        if not self._initialized:
-            self._initialize_index(len(embedding))
             
-        return embedding
+            # Use IVF index for better performance with large datasets
+            if self.cache and len(self.cache) > 10000:
+                # For large datasets, use IVF with PQ compression
+                nlist = int(np.sqrt(len(self.cache)))
+                quantizer = faiss.IndexFlatL2(dimension)
+                self.index = faiss.IndexIVFPQ(quantizer, dimension, nlist, 16, 8)
+            else:
+                # For smaller datasets, use flat index
+                self.index = faiss.IndexFlatL2(dimension)
+                
+            self._initialized = True
+            logger.info(f"Index initialized for embeddings (dimension: {dimension})")
     
-    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """Calcula la similitud del coseno entre dos vectores."""
-        vec1 = vec1.flatten()
-        vec2 = vec2.flatten()
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-        return dot_product / (norm1 * norm2)
+    def estimate_tokens(self, text: Union[str, List[str]]) -> int:
+        """Estimate token count for text"""
+        if isinstance(text, str):
+            # Rough estimate: 1 token per 4 characters
+            return len(text) // 4
+        else:
+            return sum(len(t) // 4 for t in text)
     
-    def search(self, query_embedding: List[float], k: int = 5) -> Tuple[List[float], List[int]]:
-        """Busca los k embeddings más similares en el índice."""
+    def get_ttl_hours(self, input_type: InputType) -> int:
+        """Get TTL based on input type"""
+        ttl_map = {
+            InputType.QUERY: self.config.ttl_query_embeddings,
+            InputType.DOCUMENT: self.config.ttl_document_embeddings,
+            InputType.PASSAGE: self.config.ttl_passage_embeddings
+        }
+        return ttl_map.get(input_type, self.config.ttl_other)
+    
+    def is_cache_entry_valid(self, entry: Dict, input_type: InputType) -> bool:
+        """Check if cache entry is still valid"""
+        if 'timestamp' not in entry:
+            return True
+            
+        entry_time = datetime.fromisoformat(entry['timestamp'])
+        ttl_hours = self.get_ttl_hours(input_type)
+        age_hours = (datetime.now() - entry_time).total_seconds() / 3600
+        
+        return age_hours < ttl_hours
+    
+    async def get_embedding_async(self, request: EmbeddingRequest, client) -> Optional[Union[List[float], List[List[float]]]]:
+        """Async method to get embeddings with caching"""
+        cache_key = request.cache_key()
+        
+        # Check if it's a batch request
+        is_batch = isinstance(request.input, list)
+        
+        # Check cache
+        if is_batch and cache_key in self.batch_cache:
+            self.stats["batch_hits"] += 1
+            logger.info(f"Batch cache hit for {len(request.input)} inputs")
+            return self.batch_cache[cache_key]
+        elif not is_batch and cache_key in self.cache:
+            entry = self.cache[cache_key]
+            if self.is_cache_entry_valid(entry, request.input_type):
+                self.stats["embedding_hits"] += 1
+                self.stats["total_tokens_saved"] += self.estimate_tokens(request.input)
+                logger.info(f"Embedding cache hit (type: {request.input_type.value})")
+                return entry['embedding']
+        
+        # Cache miss - need to call API
+        return None
+    
+    def get_embedding(self, request: EmbeddingRequest, client) -> Union[List[float], List[List[float]]]:
+        """Get embeddings with caching (sync wrapper)"""
+        # Try cache first
+        loop = asyncio.new_event_loop()
+        cached = loop.run_until_complete(self.get_embedding_async(request, client))
+        if cached is not None:
+            return cached
+        
+        # Cache miss - call API
+        try:
+            logger.info(f"Calling embedding API (type: {request.input_type.value})")
+            start_time = time.time()
+            
+            # Prepare API call parameters
+            params = {
+                "model": self.config.embedding_deployment,
+                "input": request.input
+            }
+            
+            # Add optional parameters
+            if request.dimensions:
+                params["dimensions"] = request.dimensions
+            if request.user:
+                params["user"] = request.user
+            if request.encoding_format == EncodingFormat.BASE64:
+                params["encoding_format"] = "base64"
+                
+            # Call API
+            response = client.embeddings.create(**params)
+            
+            elapsed = time.time() - start_time
+            logger.info(f"Embedding API call completed in {elapsed:.2f}s")
+            
+            # Extract embeddings
+            if isinstance(request.input, str):
+                embedding = response.data[0].embedding
+                self.stats["embedding_misses"] += 1
+                
+                # Initialize index if needed
+                if not self._initialized:
+                    self._initialize_index(len(embedding))
+                
+                # Cache the result
+                self._cache_single_embedding(request, embedding)
+                
+                return embedding
+            else:
+                # Batch embeddings
+                embeddings = [item.embedding for item in response.data]
+                self.stats["batch_misses"] += 1
+                
+                # Initialize index if needed
+                if not self._initialized and embeddings:
+                    self._initialize_index(len(embeddings[0]))
+                
+                # Cache batch result
+                self._cache_batch_embeddings(request, embeddings)
+                
+                return embeddings
+                
+        except Exception as e:
+            logger.error(f"Error getting embeddings: {e}")
+            raise
+    
+    def _cache_single_embedding(self, request: EmbeddingRequest, embedding: List[float]):
+        """Cache a single embedding"""
+        cache_key = request.cache_key()
+        
+        # Store in cache
+        self.cache[cache_key] = {
+            'input': request.input,
+            'input_type': request.input_type.value,
+            'embedding': embedding,
+            'dimensions': len(embedding),
+            'timestamp': datetime.now().isoformat(),
+            'user': request.user,
+            'metadata': request.metadata
+        }
+        
+        # Add to FAISS index if initialized
+        if self.index is not None:
+            embedding_vector = np.array([embedding]).astype('float32')
+            self.index.add(embedding_vector)
+        
+        logger.info(f"Cached embedding (key: {cache_key[:20]}...)")
+    
+    def _cache_batch_embeddings(self, request: EmbeddingRequest, embeddings: List[List[float]]):
+        """Cache batch embeddings"""
+        cache_key = request.cache_key()
+        
+        # Store batch in batch cache
+        self.batch_cache[cache_key] = embeddings
+        
+        # Also store individual embeddings for future single queries
+        if isinstance(request.input, list):
+            for i, (text, embedding) in enumerate(zip(request.input, embeddings)):
+                single_request = EmbeddingRequest(
+                    input=text,
+                    input_type=request.input_type,
+                    dimensions=request.dimensions,
+                    encoding_format=request.encoding_format,
+                    user=request.user,
+                    metadata=request.metadata
+                )
+                self._cache_single_embedding(single_request, embedding)
+        
+        logger.info(f"Cached batch of {len(embeddings)} embeddings")
+    
+    def search_similar(self, query_embedding: List[float], k: int = 5, threshold: float = None) -> List[Tuple[str, float, Dict]]:
+        """Search for similar embeddings in cache"""
+        if not self.index or self.index.ntotal == 0:
+            return []
+        
+        if threshold is None:
+            threshold = self.config.similarity_threshold_embeddings
+        
         query_vector = np.array([query_embedding]).astype('float32')
         distances, indices = self.index.search(query_vector, min(k, self.index.ntotal))
         
-        # Convertir distancias L2 a similitudes del coseno
-        similarities = []
-        for i, idx in enumerate(indices[0]):
-            if idx != -1:  # FAISS retorna -1 para resultados no válidos
-                stored_embedding = self.index.reconstruct(int(idx))
-                similarity = self.cosine_similarity(query_vector, stored_embedding)
-                similarities.append(similarity)
-            else:
-                similarities.append(0.0)
+        results = []
+        for dist, idx in zip(distances[0], indices[0]):
+            if idx == -1:
+                continue
                 
-        return similarities, indices[0].tolist()
-    
-    def get(self, prompt: str, client) -> Optional[str]:
-        """Busca una respuesta en caché para el prompt dado."""
-        if not self._initialized or self.index.ntotal == 0:
-            self.cache_misses += 1
-            return None
+            # Calculate cosine similarity from L2 distance
+            similarity = 1 - (dist / 2)  # Approximate conversion
             
-        # Generar embedding del prompt
-        prompt_embedding = self.get_embedding(prompt, client)
+            if similarity >= threshold:
+                # Find the cache entry
+                for cache_key, entry in self.cache.items():
+                    # Match by checking if embeddings are close enough
+                    if 'embedding' in entry:
+                        cached_emb = np.array(entry['embedding'])
+                        if np.allclose(cached_emb, self.index.reconstruct(int(idx)), atol=1e-5):
+                            results.append((cache_key, similarity, entry))
+                            break
         
-        # Buscar los más similares
-        similarities, indices = self.search(prompt_embedding, k=1)
-        
-        if similarities and similarities[0] > SIMILARITY_THRESHOLD:
-            # Hit de caché
-            self.cache_hits += 1
-            cache_entry = self.cache[indices[0]]
-            print(f"\n✅ CACHE HIT! Similitud: {similarities[0]:.4f}")
-            print(f"   Prompt original: {cache_entry['prompt'][:50]}...")
-            return cache_entry['response']
-        
-        # Miss de caché
-        self.cache_misses += 1
-        return None
+        return results
     
-    def put(self, prompt: str, response: str, client):
-        """Almacena una respuesta en caché."""
-        # Generar embedding
-        embedding = self.get_embedding(prompt, client)
-        embedding_vector = np.array([embedding]).astype('float32')
+    def get_stats_detailed(self) -> Dict:
+        """Get detailed statistics"""
+        total_embedding_requests = self.stats["embedding_hits"] + self.stats["embedding_misses"]
+        total_batch_requests = self.stats["batch_hits"] + self.stats["batch_misses"]
         
-        # Añadir al índice FAISS
-        idx = self.index.ntotal
-        self.index.add(embedding_vector)
+        embedding_hit_rate = (
+            self.stats["embedding_hits"] / total_embedding_requests 
+            if total_embedding_requests > 0 else 0
+        )
+        batch_hit_rate = (
+            self.stats["batch_hits"] / total_batch_requests 
+            if total_batch_requests > 0 else 0
+        )
         
-        # Almacenar en el diccionario de caché
-        self.cache[idx] = {
-            'prompt': prompt,
-            'response': response,
-            'timestamp': datetime.now().isoformat(),
-            'embedding': embedding
-        }
+        # Calculate cache size
+        cache_size_mb = 0
+        if os.path.exists(CACHE_FILE):
+            cache_size_mb += os.path.getsize(CACHE_FILE) / (1024 * 1024)
+        if os.path.exists(INDEX_FILE):
+            cache_size_mb += os.path.getsize(INDEX_FILE) / (1024 * 1024)
+        if os.path.exists(BATCH_CACHE_FILE):
+            cache_size_mb += os.path.getsize(BATCH_CACHE_FILE) / (1024 * 1024)
         
-        print(f"💾 Respuesta almacenada en caché (índice: {idx})")
-    
-    def save(self):
-        """Guarda la caché y el índice en disco."""
-        # Guardar el índice FAISS
-        faiss.write_index(self.index, INDEX_FILE)
-        
-        # Guardar el diccionario de caché
-        with open(CACHE_FILE, 'wb') as f:
-            pickle.dump(self.cache, f)
-            
-        print(f"💾 Caché guardada: {self.index.ntotal} entradas")
-    
-    def load(self):
-        """Carga la caché y el índice desde disco."""
-        try:
-            # Verificar si ambos archivos existen
-            if not os.path.exists(INDEX_FILE) or not os.path.exists(CACHE_FILE):
-                print("⚠️  No se encontró caché previa - iniciando nueva caché")
-                return False
-                
-            # Cargar el índice FAISS
-            self.index = faiss.read_index(INDEX_FILE)
-            self._initialized = True
-            self.embedding_dimension = self.index.d
-            
-            # Cargar el diccionario de caché
-            with open(CACHE_FILE, 'rb') as f:
-                self.cache = pickle.load(f)
-                
-            print(f"📂 Caché cargada: {self.index.ntotal} entradas (dimensión: {self.embedding_dimension})")
-            return True
-        except Exception as e:
-            print(f"⚠️  Error al cargar caché: {e}")
-            print("   Iniciando nueva caché...")
-            return False
-    
-    def get_stats(self) -> Dict:
-        """Retorna estadísticas de la caché."""
-        total_requests = self.cache_hits + self.cache_misses
-        hit_rate = self.cache_hits / total_requests if total_requests > 0 else 0
+        # Estimate cost savings (rough estimate)
+        tokens_saved = self.stats["total_tokens_saved"]
+        cost_per_1k_tokens = 0.0001  # text-embedding-3-large pricing
+        cost_saved = (tokens_saved / 1000) * cost_per_1k_tokens
         
         return {
-            'total_entries': self.index.ntotal,
-            'cache_hits': self.cache_hits,
-            'cache_misses': self.cache_misses,
-            'hit_rate': hit_rate,
-            'total_requests': total_requests
+            'embedding_stats': {
+                'hits': self.stats["embedding_hits"],
+                'misses': self.stats["embedding_misses"],
+                'hit_rate': f"{embedding_hit_rate:.2%}",
+                'total_requests': total_embedding_requests
+            },
+            'batch_stats': {
+                'hits': self.stats["batch_hits"],
+                'misses': self.stats["batch_misses"],
+                'hit_rate': f"{batch_hit_rate:.2%}",
+                'total_requests': total_batch_requests
+            },
+            'cache_info': {
+                'total_entries': len(self.cache),
+                'batch_entries': len(self.batch_cache),
+                'index_size': self.index.ntotal if self.index else 0,
+                'cache_size_mb': round(cache_size_mb, 2),
+                'dimensions': self.embedding_dimension
+            },
+            'performance': {
+                'tokens_saved': tokens_saved,
+                'estimated_cost_saved': f"${cost_saved:.4f}",
+                'avg_embedding_size': self.embedding_dimension * 4 / 1024,  # KB per embedding
+            }
         }
+    
+    def save(self):
+        """Save cache to disk"""
+        try:
+            # Save FAISS index
+            if self.index:
+                faiss.write_index(self.index, INDEX_FILE)
+            
+            # Save cache dictionaries
+            with open(CACHE_FILE, 'wb') as f:
+                pickle.dump(self.cache, f)
+            
+            with open(BATCH_CACHE_FILE, 'wb') as f:
+                pickle.dump(self.batch_cache, f)
+            
+            logger.info(f"Cache saved: {len(self.cache)} single + {len(self.batch_cache)} batch entries")
+            
+        except Exception as e:
+            logger.error(f"Error saving cache: {e}")
+    
+    def load(self) -> bool:
+        """Load cache from disk"""
+        try:
+            loaded_any = False
+            
+            # Load FAISS index
+            if os.path.exists(INDEX_FILE):
+                self.index = faiss.read_index(INDEX_FILE)
+                self._initialized = True
+                self.embedding_dimension = self.index.d
+                loaded_any = True
+            
+            # Load cache dictionary
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, 'rb') as f:
+                    self.cache = pickle.load(f)
+                loaded_any = True
+            
+            # Load batch cache
+            if os.path.exists(BATCH_CACHE_FILE):
+                with open(BATCH_CACHE_FILE, 'rb') as f:
+                    self.batch_cache = pickle.load(f)
+                loaded_any = True
+            
+            if loaded_any:
+                logger.info(f"Cache loaded: {len(self.cache)} single + {len(self.batch_cache)} batch entries")
+            else:
+                logger.info("No existing cache found")
+                
+            return loaded_any
+            
+        except Exception as e:
+            logger.error(f"Error loading cache: {e}")
+            return False
+    
+    def cleanup_expired(self):
+        """Clean up expired cache entries"""
+        expired_keys = []
+        
+        for key, entry in self.cache.items():
+            input_type = InputType(entry.get('input_type', 'query'))
+            if not self.is_cache_entry_valid(entry, input_type):
+                expired_keys.append(key)
+        
+        if expired_keys:
+            logger.info(f"Removing {len(expired_keys)} expired entries")
+            for key in expired_keys:
+                del self.cache[key]
+            
+            # Note: Rebuilding FAISS index after cleanup is complex
+            # In production, consider periodic full rebuilds
 
-def call_gpt_with_cache(prompt: str, client, cache: SemanticCache, config: Dict) -> str:
-    """Llama a GPT con caché semántica."""
-    # Buscar en caché
-    cached_response = cache.get(prompt, client)
-    
-    if cached_response:
-        return cached_response
-    
-    # Si no está en caché, llamar a GPT
-    print("🤖 Llamando a GPT-4...")
-    start_time = time.time()
-    
-    if config.get('use_foundry'):
-        # Usar Azure AI Foundry SDK
-        response = client.complete(
-            messages=[
-                SystemMessage(content="Eres un asistente útil."),
-                UserMessage(content=prompt)
-            ],
-            temperature=0.7,
-            max_tokens=500,
-            model=config['gpt_deployment']
+def create_embedding_client(config: EmbeddingCacheConfig):
+    """Create embedding client"""
+    if config.use_managed_identity:
+        credential = DefaultAzureCredential()
+        return AzureOpenAI(
+            azure_endpoint=config.endpoint,
+            azure_ad_token_provider=lambda: credential.get_token("https://cognitiveservices.azure.com/.default").token,
+            api_version=config.api_version
         )
-        result = response.choices[0].message.content
     else:
-        # Usar Azure OpenAI SDK
-        response = client.chat.completions.create(
-            model=config['gpt_deployment'],
-            messages=[
-                {"role": "system", "content": "Eres un asistente útil."},
-                {"role": "user", "content": prompt}
+        return AzureOpenAI(
+            azure_endpoint=config.endpoint,
+            api_key=config.api_key,
+            api_version=config.api_version
+        )
+
+def run_embedding_tests():
+    """Run embedding-focused tests"""
+    print("\n🚀 Embedding-Optimized Semantic Cache Test Suite")
+    print("=" * 60)
+    
+    # Configuration
+    config = EmbeddingCacheConfig.from_environment()
+    
+    if not config.endpoint:
+        print("\n❌ Please set environment variables:")
+        print("   export AZURE_OPENAI_ENDPOINT='your-endpoint'")
+        print("   export AZURE_OPENAI_KEY='your-key'")
+        print("   export EMBEDDING_DEPLOYMENT='text-embedding-3-large'")
+        return
+    
+    print(f"\n📍 Configuration:")
+    print(f"   Endpoint: {config.endpoint}")
+    print(f"   Deployment: {config.embedding_deployment}")
+    print(f"   Default Dimensions: {config.default_dimensions}")
+    print(f"   TTL (Query/Document): {config.ttl_query_embeddings}h / {config.ttl_document_embeddings}h")
+    print("-" * 60)
+    
+    # Initialize
+    client = create_embedding_client(config)
+    cache = EmbeddingSemanticCache(config)
+    cache.load()
+    
+    # Test scenarios
+    test_scenarios = [
+        # Single embeddings - queries
+        EmbeddingRequest(
+            input="What is machine learning?",
+            input_type=InputType.QUERY
+        ),
+        EmbeddingRequest(
+            input="What is machine learning?",  # Exact duplicate
+            input_type=InputType.QUERY
+        ),
+        EmbeddingRequest(
+            input="Explain machine learning",  # Similar query
+            input_type=InputType.QUERY
+        ),
+        
+        # Single embeddings - documents
+        EmbeddingRequest(
+            input="Machine learning is a subset of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed.",
+            input_type=InputType.DOCUMENT
+        ),
+        
+        # Batch embeddings
+        EmbeddingRequest(
+            input=[
+                "What is deep learning?",
+                "How does neural network work?",
+                "Explain backpropagation"
             ],
-            temperature=0.7,
-            max_tokens=500
-        )
-        result = response.choices[0].message.content
-    
-    elapsed_time = time.time() - start_time
-    print(f"⏱️  Tiempo de respuesta: {elapsed_time:.2f}s")
-    
-    # Almacenar en caché
-    cache.put(prompt, result, client)
-    
-    return result
-
-def create_client(config: Dict):
-    """Crea el cliente apropiado según la configuración."""
-    if config.get('use_foundry'):
-        print("🏭 Usando Azure AI Foundry SDK")
-        # Cliente para chat - usando el endpoint base sin el modelo en la URL
-        chat_client = ChatCompletionsClient(
-            endpoint=config['endpoint'],
-            credential=AzureKeyCredential(config['api_key'])
-        )
-        # Cliente para embeddings (usando OpenAI SDK porque Foundry usa la misma API)
-        # Extraer el endpoint base de OpenAI
-        openai_endpoint = config['endpoint'].replace('services.ai.azure.com/api/projects/myFirstProject', 'openai.azure.com')
-        embedding_client = AzureOpenAI(
-            azure_endpoint=openai_endpoint,
-            api_key=config['api_key'],
-            api_version="2024-02-01"
-        )
-        return chat_client, embedding_client
-    else:
-        print("🔷 Usando Azure OpenAI SDK")
-        client = AzureOpenAI(
-            azure_endpoint=config['endpoint'],
-            api_key=config['api_key'],
-            api_version=config['api_version']
-        )
-        return client, client
-
-def run_tests():
-    """Ejecuta pruebas de la caché semántica."""
-    # Obtener configuración
-    config = get_parameters()
-    
-    print("\n🚀 Iniciando pruebas de caché semántica...")
-    print(f"📍 Endpoint: {config['endpoint']}")
-    print(f"🤖 GPT Deployment: {config['gpt_deployment']}")
-    print(f"📊 Embedding Deployment: {config['embedding_deployment']}")
-    print(f"🎯 Umbral de similitud: {SIMILARITY_THRESHOLD}")
-    print("-" * 50)
-    
-    # Inicializar cliente
-    chat_client, embedding_client = create_client(config)
-    
-    # Inicializar caché
-    cache = SemanticCache(config=config)
-    cache.load()  # Intentar cargar caché existente
-    
-    # Conjunto de pruebas con prompts similares
-    test_prompts = [
-        # Grupo 1: Preguntas sobre Python
-        "¿Cuáles son las mejores prácticas para escribir código Python?",
-        "¿Qué son las best practices para programar en Python?",
-        "Dame las mejores prácticas de Python",
+            input_type=InputType.QUERY
+        ),
         
-        # Grupo 2: Preguntas sobre IA
-        "¿Qué es el aprendizaje automático?",
-        "Explícame qué es machine learning",
-        "¿Puedes explicar el aprendizaje automático?",
+        # Same batch again (should hit cache)
+        EmbeddingRequest(
+            input=[
+                "What is deep learning?",
+                "How does neural network work?",
+                "Explain backpropagation"
+            ],
+            input_type=InputType.QUERY
+        ),
         
-        # Grupo 3: Preguntas diferentes
-        "¿Cuál es la capital de Francia?",
-        "¿Cómo se hace una pizza margherita?",
-        "¿Cuáles son los beneficios del ejercicio?",
+        # Embeddings with custom dimensions
+        EmbeddingRequest(
+            input="Custom dimension test",
+            input_type=InputType.QUERY,
+            dimensions=1536  # Smaller dimension
+        ),
         
-        # Repetir algunas para probar caché
-        "¿Cuáles son las mejores prácticas para escribir código Python?",
-        "¿Qué es el aprendizaje automático?",
+        # Document embeddings with metadata
+        EmbeddingRequest(
+            input="Advanced AI systems use transformer architectures for natural language processing.",
+            input_type=InputType.DOCUMENT,
+            user="test_user",
+            metadata={"source": "ai_textbook", "chapter": 5}
+        )
     ]
     
-    print("\n🧪 EJECUTANDO PRUEBAS:\n")
+    print("\n🧪 Running Embedding Tests:\n")
     
-    for i, prompt in enumerate(test_prompts, 1):
+    for i, request in enumerate(test_scenarios, 1):
         print(f"\n{'='*60}")
-        print(f"Prueba {i}/{len(test_prompts)}")
-        print(f"Prompt: {prompt}")
+        print(f"Test {i}/{len(test_scenarios)}")
+        
+        if isinstance(request.input, str):
+            print(f"Input: {request.input[:80]}...")
+        else:
+            print(f"Batch Input: {len(request.input)} items")
+        
+        print(f"Type: {request.input_type.value}")
+        if request.dimensions:
+            print(f"Dimensions: {request.dimensions}")
         print("-" * 60)
         
         start_time = time.time()
         
-        # Usar el cliente apropiado
-        if config.get('use_foundry'):
-            response = call_gpt_with_cache(prompt, chat_client, cache, config)
-        else:
-            response = call_gpt_with_cache(prompt, chat_client, cache, config)
-        
-        total_time = time.time() - start_time
-        
-        print(f"\nRespuesta: {response[:200]}...")
-        print(f"⏱️  Tiempo total: {total_time:.2f}s")
-        
-        # Mostrar estadísticas actuales
-        stats = cache.get_stats()
-        print(f"\n📊 Estadísticas actuales:")
-        print(f"   - Entradas en caché: {stats['total_entries']}")
-        print(f"   - Cache hits: {stats['cache_hits']}")
-        print(f"   - Cache misses: {stats['cache_misses']}")
-        print(f"   - Hit rate: {stats['hit_rate']:.2%}")
+        try:
+            result = cache.get_embedding(request, client)
+            elapsed = time.time() - start_time
+            
+            if isinstance(result, list) and isinstance(result[0], float):
+                print(f"✅ Single embedding received (dim: {len(result)})")
+            else:
+                print(f"✅ Batch of {len(result)} embeddings received")
+            
+            print(f"⏱️  Time: {elapsed:.3f}s")
+            
+            # Show current stats
+            stats = cache.get_stats_detailed()
+            print(f"\n📊 Embedding Stats:")
+            print(f"   Single: {stats['embedding_stats']['hits']} hits / {stats['embedding_stats']['misses']} misses ({stats['embedding_stats']['hit_rate']})")
+            print(f"   Batch: {stats['batch_stats']['hits']} hits / {stats['batch_stats']['misses']} misses ({stats['batch_stats']['hit_rate']})")
+            print(f"   Tokens saved: {stats['performance']['tokens_saved']}")
+            
+        except Exception as e:
+            logger.error(f"Test failed: {e}")
+            continue
     
-    # Guardar caché
+    # Save cache
     cache.save()
     
-    # Resumen final
+    # Final report
     print(f"\n{'='*60}")
-    print("📈 RESUMEN FINAL:")
-    final_stats = cache.get_stats()
-    print(f"   - Total de consultas: {final_stats['total_requests']}")
-    print(f"   - Cache hits: {final_stats['cache_hits']}")
-    print(f"   - Cache misses: {final_stats['cache_misses']}")
-    print(f"   - Hit rate final: {final_stats['hit_rate']:.2%}")
-    print(f"   - Entradas en caché: {final_stats['total_entries']}")
+    print("📈 FINAL REPORT:")
+    print(f"{'='*60}")
     
-    # Prueba adicional: buscar similitudes
-    print(f"\n{'='*60}")
-    print("🔍 ANÁLISIS DE SIMILITUDES:\n")
+    final_stats = cache.get_stats_detailed()
     
-    test_query = "¿Cuáles son las buenas prácticas de programación en Python?"
-    print(f"Query de prueba: {test_query}")
+    print("\n📊 Embedding Performance:")
+    for key, value in final_stats['embedding_stats'].items():
+        print(f"   {key}: {value}")
     
-    # Usar el cliente de embeddings
-    query_embedding = cache.get_embedding(test_query, embedding_client)
-    similarities, indices = cache.search(query_embedding, k=5)
+    print("\n📦 Batch Performance:")
+    for key, value in final_stats['batch_stats'].items():
+        print(f"   {key}: {value}")
     
-    print("\nTop 5 entradas más similares:")
-    for i, (sim, idx) in enumerate(zip(similarities, indices)):
-        if idx != -1 and idx in cache.cache:
-            entry = cache.cache[idx]
-            print(f"\n{i+1}. Similitud: {sim:.4f}")
-            print(f"   Prompt: {entry['prompt']}")
-            print(f"   Timestamp: {entry['timestamp']}")
+    print("\n💾 Cache Information:")
+    for key, value in final_stats['cache_info'].items():
+        print(f"   {key}: {value}")
+    
+    print("\n💰 Cost Savings:")
+    for key, value in final_stats['performance'].items():
+        print(f"   {key}: {value}")
+    
+    # Search demonstration
+    print(f"\n🔍 Similarity Search Demo:")
+    if cache.cache:
+        # Get a sample embedding
+        sample_key = list(cache.cache.keys())[0]
+        sample_embedding = cache.cache[sample_key]['embedding']
+        
+        similar = cache.search_similar(sample_embedding, k=3)
+        print(f"\nTop 3 similar to '{cache.cache[sample_key]['input'][:50]}...':")
+        for i, (key, similarity, entry) in enumerate(similar, 1):
+            print(f"{i}. Similarity: {similarity:.4f} - {entry['input'][:50]}...")
 
 if __name__ == "__main__":
     try:
-        run_tests()
+        run_embedding_tests()
     except KeyboardInterrupt:
-        print("\n\n⚠️  Prueba interrumpida por el usuario")
+        print("\n\n⚠️  Test interrupted")
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
