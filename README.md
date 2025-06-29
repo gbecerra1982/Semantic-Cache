@@ -33,14 +33,14 @@ graph TB
         H[(Caché Interno APIM)]
         I[Búsqueda Semántica]
         J[Almacenamiento con TTL]
-        R[(Azure Cache for Redis<br/>meli-testing01)]
+        R[(Azure Cache for Redis)]
     end
     
     subgraph "Azure AI Foundry"
         K[AI Foundry Gateway]
         L[Deployment Manager]
         M[text-embedding-3-large]
-        N[GPT-4]
+        N[GPT-4.1]
     end
     
     subgraph "Métricas"
@@ -80,7 +80,7 @@ graph TB
     
     style C fill:#0078D4,stroke:#fff,stroke-width:2px
     style D fill:#FF6B6B,stroke:#fff,stroke-width:2px
-    style H fill:#51CF66,stroke:#fff,stroke-width:2px
+    style H fill:#51CF66,stroke:#000,stroke-width:2px,color:#000
     style R fill:#DC382D,stroke:#fff,stroke-width:2px
     style K fill:#FFA94D,stroke:#fff,stroke-width:2px
     style M fill:#845EF7,stroke:#fff,stroke-width:2px
@@ -105,7 +105,7 @@ graph TB
 | Operación | Score Threshold | TTL | Particionamiento | Beneficio |
 |-----------|----------------|-----|------------------|-----------|
 | **Embeddings** | 0.95 | 30 días | modelo, tipo, dimensiones, usuario | 95% reducción en latencia |
-| **Completions** | 0.10 | 2 horas | modelo, temperatura, tokens, usuario | 85% reducción en costos |
+| **Chat Completions** | 0.10 | 2 horas | modelo, temperatura, tokens, usuario | 85% reducción en costos |
 
 ### 💡 Ventajas Clave
 
@@ -136,7 +136,7 @@ graph TB
 
 3. **Despliega los modelos necesarios**
    - En el menú lateral: **Deployments** → **+ Deploy model**
-   - Modelo 1: `gpt-4` (nombre: "gpt-4")
+   - Modelo 1: `gpt-4` (nombre: "gpt-4.1")
    - Modelo 2: `text-embedding-3-large` (nombre: "text-embedding-3-large")
 
 ### 📝 Paso 2: Importar API de AI Foundry en API Management
@@ -154,42 +154,33 @@ Según la [documentación oficial de Microsoft](https://learn.microsoft.com/en-u
                └── + Add API
    ```
 
-2. **Selecciona "Azure AI services"**:
-   - En el catálogo de APIs, busca la sección **"Define a new API"**
-   - Selecciona **"AI services"** o **"Azure AI"**
+2. **Selecciona "Create from Azure resource"**:
+   - En las opciones que aparecen, busca y selecciona:
+   - **Azure AI Foundry**
+   - Descripción: "Connect API Management services to Azure AI Foundry"
 
-3. **Configura la importación**:
-   - **Service Type**: Azure AI services
-   - **Azure AI service**: Selecciona tu recurso de AI Foundry
+3. **Configura la conexión con AI Foundry**:
+   - **Subscription**: Tu suscripción de Azure
+   - **Resource**: Selecciona tu proyecto de AI Foundry
    - **Display name**: `Azure AI Foundry API`
    - **Name**: `azure-ai-foundry-api`
    - **API URL suffix**: `ai-foundry`
-   - **Subscription required**: ✓ Marcado
+   - **Base URL**: Se autocompletará con tu endpoint de AI Foundry
    - **Products**: Starter, Unlimited (o los que tengas configurados)
+   - **Gateways**: Managed
 
-4. **Configuración avanzada**:
-   - **API version**: v1
-   - **Protocols**: HTTPS
-   - **Gateway**: Managed
+4. **Configuración de autenticación**:
+   - **Import method**: ✓ Use managed identity
+   - **User assigned managed identity**: Selecciona si tienes una configurada
+   - **Add all AI Foundry operations**: ✓ Marcado
 
 5. **Click "Create"**
 
-**Método alternativo - Importación manual**:
-
-Si la opción de AI services no aparece:
-
-1. Selecciona **"OpenAPI"** en lugar de AI services
-2. **OpenAPI specification**: Pega esta URL:
-   ```
-   https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-02-01/inference.json
-   ```
-3. Configura los demás campos igual que arriba
-
-**Beneficios de la importación**:
-- ✅ Obtiene todas las operaciones de OpenAI automáticamente
-- ✅ Mantiene la estructura de rutas compatible
-- ✅ Facilita la aplicación de políticas por operación
-- ✅ Incluye validación de esquemas
+**Qué hace automáticamente**:
+- ✅ Importa todas las operaciones de OpenAI (chat, completions, embeddings)
+- ✅ Configura la autenticación con managed identity
+- ✅ Establece el backend correcto de AI Foundry
+- ✅ Mantiene compatibilidad con SDKs de OpenAI
 
 ### 📝 Paso 3: Verificar la Importación
 
@@ -215,63 +206,186 @@ Si la opción de AI services no aparece:
 
 **¿Qué hace?**: Configura caché semántico optimizado para operaciones de embedding con alta precisión.
 
-1. **Selecciona la operación de embeddings**:
+1. **Navega a la operación de embeddings**:
    ```
-   Azure AI Foundry API
-   └── All operations
-       └── CreateEmbeddings
-           └── Design view
+   APIs
+   └── Azure AI Foundry API
+       └── All operations (vista de lista)
+           └── Busca: "Creates embeddings" o "/deployments/{deployment-id}/embeddings"
+           └── Click en la operación
    ```
 
-2. **En "Inbound processing"**, click en `</>` (Policy code editor)
+2. **Entra al editor de políticas**:
+   - En la vista de diseño de la operación
+   - En la sección **"Inbound processing"**
+   - Click en el icono **`</>`** (Policy code editor)
 
-3. **Reemplaza con la política optimizada**:
+3. **Borra todo el contenido existente y pega la política completa**:
+   
+   **IMPORTANTE**: Copia TODO el contenido del archivo `apim-policy-embeddings-only-v2.xml` que incluye:
+
    ```xml
    <policies>
        <inbound>
            <base />
-           <!-- La política completa está en apim-policy-embeddings-only-v2.xml -->
+           
+           <!-- Configurar el backend para embeddings -->
+           <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
+           
+           <!-- Extraer y validar el request body -->
+           <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
+           
+           <!-- Extraer parámetros específicos de embeddings -->
+           <set-variable name="input-type" value="@{
+               var body = (JObject)context.Variables[&quot;requestBody&quot;];
+               return body[&quot;input_type&quot;]?.ToString() ?? &quot;query&quot;;
+           }" />
+           
+           <!-- ... resto de la política ... -->
+           
+           <!-- Caché Semántico Optimizado para Embeddings -->
+           <azure-openai-semantic-cache-lookup 
+               score-threshold="0.95"
+               embeddings-backend-id="text-embedding-3-large" 
+               embeddings-backend-auth="system-assigned">
+               <!-- ... configuración de vary-by ... -->
+           </azure-openai-semantic-cache-lookup>
        </inbound>
+       
        <backend>
            <base />
        </backend>
+       
        <outbound>
            <base />
-           <!-- Almacena con TTL de 30 días para embeddings -->
+           <!-- TTL de 30 días para embeddings -->
+           <choose>
+               <when condition="@(context.Response.StatusCode == 200)">
+                   <azure-openai-semantic-cache-store duration="2592000" />
+               </when>
+           </choose>
+           <!-- ... headers de monitoreo ... -->
        </outbound>
+       
+       <on-error>
+           <base />
+           <!-- ... manejo de errores ... -->
+       </on-error>
+   </policies>
+   ```
+
+4. **Actualiza el backend-id si es necesario**:
+   - Busca: `backend-id="aoai-meli-openai-endpoint"`
+   - Reemplaza con tu backend ID real
+
+5. **Click "Save"**
+
+**Características clave de esta política**:
+- **Score threshold: 0.95** - Solo cachea coincidencias exactas
+- **TTL: 30 días (2592000 segundos)** - Embeddings son determinísticos
+- **Particionamiento avanzado**: 
+  - Por tipo de input (query/document/passage)
+  - Por dimensiones (1536/3072)
+  - Por usuario
+  - Hash exacto del input
+- **Headers de monitoreo**:
+  - `X-Semantic-Cache-Status`: HIT/MISS
+  - `X-Cache-TTL-Days`: 30
+  - `X-Embedding-Type`: query/document/passage
+  - `X-Batch-Size`: Para operaciones batch
+
+### 📝 Paso 5: Aplicar Política para Chat Completions
+
+**¿Qué hace?**: Configura caché semántico flexible para operaciones de chat con threshold bajo.
+
+1. **Navega a la operación de chat completions**:
+   ```
+   APIs
+   └── Azure AI Foundry API
+       └── All operations
+           └── Busca: "Creates a chat completion" o "/deployments/{deployment-id}/chat/completions"
+           └── Click en la operación
+   ```
+
+2. **Entra al editor de políticas**:
+   - Click en **`</>`** en "Inbound processing"
+
+3. **Borra todo y pega el contenido completo de `apim-policy-completions-only-v2.xml`**:
+
+   ```xml
+   <policies>
+       <inbound>
+           <base />
+           
+           <!-- Configurar el backend para completions -->
+           <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
+           
+           <!-- Extraer parámetros del request -->
+           <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
+           
+           <set-variable name="temperature" value="@{
+               var body = (JObject)context.Variables[&quot;requestBody&quot;];
+               return body[&quot;temperature&quot;]?.Value<float>() ?? 0.7f;
+           }" />
+           
+           <!-- ... resto de variables ... -->
+           
+           <!-- Caché Semántico para Completions -->
+           <azure-openai-semantic-cache-lookup 
+               score-threshold="0.10"
+               embeddings-backend-id="text-embedding-3-large" 
+               embeddings-backend-auth="system-assigned" 
+               max-message-count="20">
+               <!-- ... configuración de vary-by ... -->
+           </azure-openai-semantic-cache-lookup>
+       </inbound>
+       
+       <backend>
+           <base />
+       </backend>
+       
+       <outbound>
+           <base />
+           <!-- TTL fijo de 2 horas -->
+           <choose>
+               <when condition="@(context.Response.StatusCode == 200)">
+                   <azure-openai-semantic-cache-store duration="7200" />
+               </when>
+           </choose>
+           <!-- ... headers de monitoreo ... -->
+       </outbound>
+       
        <on-error>
            <base />
        </on-error>
    </policies>
    ```
 
-4. **Click "Save"**
+4. **Actualiza el backend-id**
 
-**Características de esta política**:
-- **Score threshold: 0.95** - Solo cachea matches exactos
-- **TTL: 30 días** - Los embeddings son determinísticos
-- **Particionamiento**: Por input_type, dimensions, user
-- **Headers informativos**: X-Cache-Status, X-Cache-TTL-Days
+5. **Click "Save"**
 
-### 📝 Paso 5: Aplicar Política para Completions
+**Características clave de esta política**:
+- **Score threshold: 0.10** - Permite consultas similares
+- **TTL: 2 horas (7200 segundos)** - Balance frescura/eficiencia
+- **Particionamiento inteligente**:
+  - Por grupo de temperatura (deterministic/low/medium/high)
+  - Por rango de max_tokens
+  - Por usuario
+  - Por system message
+  - Por funciones/herramientas
+- **Headers informativos**:
+  - `X-Temperature-Group`: Clasificación de temperatura
+  - `X-Recommended-TTL-Hours`: TTL sugerido por temperatura
+  - `X-Cache-Optimization-Tip`: Consejos de optimización
 
-**¿Qué hace?**: Configura caché semántico flexible para chat y completions.
+### 📝 Paso 5.1: Aplicar Política para Completions (Opcional)
 
-1. **Selecciona la operación de chat**:
-   ```
-   Azure AI Foundry API
-   └── All operations
-       └── CreateChatCompletion
-           └── Design view
-   ```
+Si también usas el endpoint de completions (no chat):
 
-2. **Aplica la política** desde `apim-policy-completions-only-v2.xml`
-
-**Características de esta política**:
-- **Score threshold: 0.10** - Permite variaciones en consultas
-- **TTL: 2 horas fijo** - Balance entre frescura y eficiencia
-- **Particionamiento**: Por temperatura, max_tokens, user
-- **Headers de optimización**: Recomendaciones de TTL por temperatura
+1. **Navega a**: `/deployments/{deployment-id}/completions`
+2. **Aplica la misma política** de completions
+3. La política detectará automáticamente el tipo de operación
 
 ### 📝 Paso 6: Configurar Backend y Seguridad
 
