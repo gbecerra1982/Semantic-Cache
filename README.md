@@ -33,6 +33,7 @@ graph TB
         H[(Caché Interno APIM)]
         I[Búsqueda Semántica]
         J[Almacenamiento con TTL]
+        R[(Azure Cache for Redis<br/>meli-testing01)]
     end
     
     subgraph "Azure AI Foundry"
@@ -61,7 +62,8 @@ graph TB
     I -->|Cache Hit| H
     I -->|Cache Miss| K
     
-    H -->|Return Cached| A
+    H -->|Redis Lookup| R
+    R -->|Return Cached| A
     
     K --> L
     L --> M
@@ -70,6 +72,7 @@ graph TB
     M -->|Store Result| J
     N -->|Store Result| J
     J --> H
+    H -->|Persist| R
     
     D --> O
     O --> P
@@ -78,6 +81,7 @@ graph TB
     style C fill:#0078D4,stroke:#fff,stroke-width:2px
     style D fill:#FF6B6B,stroke:#fff,stroke-width:2px
     style H fill:#51CF66,stroke:#fff,stroke-width:2px
+    style R fill:#DC382D,stroke:#fff,stroke-width:2px
     style K fill:#FFA94D,stroke:#fff,stroke-width:2px
     style M fill:#845EF7,stroke:#fff,stroke-width:2px
     style N fill:#845EF7,stroke:#fff,stroke-width:2px
@@ -88,9 +92,11 @@ graph TB
 1. **Cliente** envía request a API Management
 2. **Política de Caché** analiza el tipo de operación
 3. **Búsqueda Semántica** verifica si existe respuesta similar
-4. **Cache Hit**: Retorna respuesta inmediata (<200ms)
-5. **Cache Miss**: Forward a Azure AI Foundry
-6. **Almacenamiento**: Guarda respuesta con TTL optimizado
+4. **Redis Lookup**: Consulta en Azure Cache for Redis (meli-testing01)
+5. **Cache Hit**: Retorna respuesta desde Redis (<50ms)
+6. **Cache Miss**: Forward a Azure AI Foundry
+7. **Almacenamiento**: Guarda respuesta en caché interno y persiste en Redis
+8. **TTL Management**: Redis gestiona expiración automática
 
 ## ✨ Características Principales
 
@@ -133,39 +139,57 @@ graph TB
    - Modelo 1: `gpt-4` (nombre: "gpt-4")
    - Modelo 2: `text-embedding-3-large` (nombre: "text-embedding-3-large")
 
-### 📝 Paso 2: Integrar con API Management
+### 📝 Paso 2: Importar API de AI Foundry en API Management
 
-**¿Qué hace?**: Conecta AI Foundry con API Management para aplicar las políticas de caché.
+**¿Qué hace?**: Importa la definición de API de Azure AI Foundry para poder aplicar las políticas de caché.
 
 Según la [documentación oficial de Microsoft](https://learn.microsoft.com/en-us/azure/api-management/azure-ai-foundry-api), sigue estos pasos:
 
-1. **En Azure AI Foundry Studio**:
+1. **En Azure Portal, navega a tu API Management**:
    ```
-   Tu Proyecto
-   └── Management (menú lateral)
-       └── API access
-           └── Deploy to API Management
+   Azure Portal
+   └── API Management services
+       └── tu-instancia-apim
+           └── APIs (menú lateral)
+               └── + Add API
    ```
 
-2. **Configura el despliegue**:
-   - **API Management instance**: Selecciona tu instancia existente o crea una nueva
-   - **API name**: `Azure AI Foundry API`
+2. **Selecciona "Azure AI services"**:
+   - En el catálogo de APIs, busca la sección **"Define a new API"**
+   - Selecciona **"AI services"** o **"Azure AI"**
+
+3. **Configura la importación**:
+   - **Service Type**: Azure AI services
+   - **Azure AI service**: Selecciona tu recurso de AI Foundry
+   - **Display name**: `Azure AI Foundry API`
+   - **Name**: `azure-ai-foundry-api`
    - **API URL suffix**: `ai-foundry`
    - **Subscription required**: ✓ Marcado
-   - **Products**: Selecciona los productos aplicables
+   - **Products**: Starter, Unlimited (o los que tengas configurados)
 
-3. **Opciones de importación**:
-   - ✓ Import all Azure OpenAI endpoints
-   - ✓ Configure managed identity
-   - ✓ Add CORS policy
+4. **Configuración avanzada**:
+   - **API version**: v1
+   - **Protocols**: HTTPS
+   - **Gateway**: Managed
 
-4. **Click "Deploy"**
+5. **Click "Create"**
 
-**Beneficios de este método**:
-- ✅ Importa automáticamente todas las operaciones
-- ✅ Configura la autenticación correctamente
-- ✅ Agrega transformaciones necesarias
-- ✅ Mantiene la compatibilidad con OpenAI SDK
+**Método alternativo - Importación manual**:
+
+Si la opción de AI services no aparece:
+
+1. Selecciona **"OpenAPI"** en lugar de AI services
+2. **OpenAPI specification**: Pega esta URL:
+   ```
+   https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/stable/2024-02-01/inference.json
+   ```
+3. Configura los demás campos igual que arriba
+
+**Beneficios de la importación**:
+- ✅ Obtiene todas las operaciones de OpenAI automáticamente
+- ✅ Mantiene la estructura de rutas compatible
+- ✅ Facilita la aplicación de políticas por operación
+- ✅ Incluye validación de esquemas
 
 ### 📝 Paso 3: Verificar la Importación
 
