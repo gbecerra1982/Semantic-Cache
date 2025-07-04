@@ -2,48 +2,37 @@
     <inbound>
         <base />
         
-        <!-- Configurar el backend para completions -->
-        <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
-        
         <!-- Extraer y validar el request body -->
         <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
-        
         <!-- Extraer parámetros específicos de completions -->
         <set-variable name="temperature" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
-            return body[&quot;temperature&quot;]?.Value<float>() ?? 0.7f;
+            return body[&quot;temperature&quot;]?.Value<float>()?? 0.7f;
         }" />
-        
         <set-variable name="max-tokens" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
             return body[&quot;max_tokens&quot;]?.Value<int>() ?? 800;
         }" />
-        
         <set-variable name="model" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
             return body[&quot;model&quot;]?.ToString() ?? &quot;gpt-4&quot;;
         }" />
-        
         <set-variable name="user" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
             return body[&quot;user&quot;]?.ToString() ?? &quot;anonymous&quot;;
         }" />
-        
         <set-variable name="top-p" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
             return body[&quot;top_p&quot;]?.Value<float>() ?? 1.0f;
         }" />
-        
         <set-variable name="frequency-penalty" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
             return body[&quot;frequency_penalty&quot;]?.Value<float>() ?? 0.0f;
         }" />
-        
         <set-variable name="presence-penalty" value="@{
             var body = (JObject)context.Variables[&quot;requestBody&quot;];
             return body[&quot;presence_penalty&quot;]?.Value<float>() ?? 0.0f;
         }" />
-        
         <!-- Determinar el grupo de temperatura para optimización de caché -->
         <set-variable name="temperature-group" value="@{
             var temp = (float)context.Variables[&quot;temperature&quot;];
@@ -52,28 +41,15 @@
             else if (temp <= 0.8) { return &quot;medium&quot;; }
             else { return &quot;high&quot;; }
         }" />
-        
         <!-- Caché Semántico Optimizado para Completions -->
         <!-- score-threshold: 0.10 para permitir respuestas similares pero no idénticas -->
-        <azure-openai-semantic-cache-lookup 
-            score-threshold="0.10"
-            embeddings-backend-id="text-embedding-3-large" 
-            embeddings-backend-auth="system-assigned" 
-            max-message-count="20"
-            ignore-system-messages="false">
-            
+        <azure-openai-semantic-cache-lookup score-threshold="0.10" embeddings-backend-id="text-embedding" embeddings-backend-auth="system-assigned" max-message-count="20" ignore-system-messages="false">
             <!-- Particionamiento principal por suscripción -->
             <vary-by>@(context.Subscription?.Id ?? &quot;public&quot;)</vary-by>
-            
-            <!-- Particionamiento por deployment -->
-            <vary-by>@(context.Request.MatchedParameters[&quot;deployment-id&quot;])</vary-by>
-            
             <!-- Particionamiento por modelo -->
             <vary-by>@(context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;gpt-4&quot;))</vary-by>
-            
             <!-- Particionamiento por grupo de temperatura -->
             <vary-by>@(context.Variables.GetValueOrDefault(&quot;temperature-group&quot;, &quot;medium&quot;))</vary-by>
-            
             <!-- Particionamiento por rango de tokens -->
             <vary-by>@{
                 var maxTokens = (int)context.Variables[&quot;max-tokens&quot;];
@@ -82,10 +58,8 @@
                 else if (maxTokens <= 2048) { return &quot;tokens-large&quot;; }
                 else { return &quot;tokens-xlarge&quot;; }
             }</vary-by>
-            
             <!-- Particionamiento por usuario (si se proporciona) -->
             <vary-by>@(context.Variables.GetValueOrDefault(&quot;user&quot;, &quot;anonymous&quot;))</vary-by>
-            
             <!-- Particionamiento por parámetros de penalización -->
             <vary-by>@{
                 var freqPenalty = (float)context.Variables[&quot;frequency-penalty&quot;];
@@ -107,7 +81,6 @@
                 
                 return $&quot;freq:{freqGroup}|pres:{presGroup}&quot;;
             }</vary-by>
-            
             <!-- Hash del system message si existe -->
             <vary-by>@{
                 var body = (JObject)context.Variables[&quot;requestBody&quot;];
@@ -122,7 +95,6 @@
                 }
                 return &quot;no-system&quot;;
             }</vary-by>
-            
             <!-- Funciones o herramientas si están presentes -->
             <vary-by>@{
                 var body = (JObject)context.Variables[&quot;requestBody&quot;];
@@ -137,24 +109,19 @@
                 return &quot;no-tools&quot;;
             }</vary-by>
         </azure-openai-semantic-cache-lookup>
-        
         <!-- Headers de debugging para completions -->
         <set-header name="X-Completion-Model" exists-action="override">
             <value>@(context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;gpt-4&quot;))</value>
         </set-header>
-        
         <set-header name="X-Temperature" exists-action="override">
-            <value>@(context.Variables.GetValueOrDefault(&quot;temperature&quot;, &quot;0.7&quot;))</value>
+            <value>@(Convert.ToString(context.Variables.GetValueOrDefault("temperature", 0.7f)))</value>
         </set-header>
-        
         <set-header name="X-Temperature-Group" exists-action="override">
             <value>@(context.Variables.GetValueOrDefault(&quot;temperature-group&quot;, &quot;medium&quot;))</value>
         </set-header>
-        
         <set-header name="X-Max-Tokens" exists-action="override">
-            <value>@(context.Variables.GetValueOrDefault(&quot;max-tokens&quot;, &quot;800&quot;))</value>
+            <value>@(Convert.ToString(context.Variables.GetValueOrDefault(&quot;max-tokens&quot;, 800)))</value>
         </set-header>
-        
         <set-header name="X-User" exists-action="override">
             <value>@(context.Variables.GetValueOrDefault(&quot;user&quot;, &quot;anonymous&quot;))</value>
         </set-header>
@@ -174,7 +141,6 @@
                 <azure-openai-semantic-cache-store duration="7200" />
             </when>
         </choose>
-        
         <!-- Headers de respuesta para monitoreo de caché -->
         <set-header name="X-Semantic-Cache-Status" exists-action="override">
             <value>@{
@@ -182,7 +148,6 @@
                 return status.ToString().ToUpper();
             }</value>
         </set-header>
-        
         <set-header name="X-Semantic-Cache-Score" exists-action="override">
             <value>@{
                 var status = context.Variables.GetValueOrDefault(&quot;semantic-cache-lookup-status&quot;, &quot;none&quot;);
@@ -193,7 +158,6 @@
                 return &quot;N/A&quot;;
             }</value>
         </set-header>
-        
         <!-- TTL recomendado basado en temperatura -->
         <set-header name="X-Recommended-TTL-Hours" exists-action="override">
             <value>@{
@@ -204,28 +168,23 @@
                 else { return &quot;1&quot;; }
             }</value>
         </set-header>
-        
         <!-- TTL actual aplicado -->
         <set-header name="X-Cache-TTL-Hours" exists-action="override">
             <value>2</value>
         </set-header>
-        
         <!-- Tiempo de respuesta -->
         <set-header name="X-Response-Time-Ms" exists-action="override">
             <value>@(context.Elapsed.TotalMilliseconds.ToString(&quot;F0&quot;))</value>
         </set-header>
-        
         <!-- Información de la clave de caché -->
         <set-header name="X-Cache-Key" exists-action="override">
             <value>@{
-                var deployment = context.Request.MatchedParameters[&quot;deployment-id&quot;];
                 var model = context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;gpt-4&quot;);
                 var tempGroup = context.Variables.GetValueOrDefault(&quot;temperature-group&quot;, &quot;medium&quot;);
                 var user = context.Variables.GetValueOrDefault(&quot;user&quot;, &quot;anonymous&quot;);
-                return $&quot;comp:{deployment}|model:{model}|temp:{tempGroup}|user:{user}&quot;;
+                return $&quot;model:{model}|temp:{tempGroup}|user:{user}&quot;;
             }</value>
         </set-header>
-        
         <!-- Información sobre el contexto de mensajes -->
         <set-header name="X-Message-Count" exists-action="override">
             <value>@{
@@ -234,7 +193,6 @@
                 return messages?.Count.ToString() ?? &quot;0&quot;;
             }</value>
         </set-header>
-        
         <!-- Recomendaciones de optimización -->
         <set-header name="X-Cache-Optimization-Tip" exists-action="override">
             <value>@{
@@ -258,13 +216,12 @@
                 return &quot;Use consistent temperature values for better cache hits&quot;;
             }</value>
         </set-header>
-        
         <!-- Información adicional sobre el modelo y configuración -->
         <set-header name="X-Completion-Info" exists-action="override">
             <value>@{
                 var model = context.Variables.GetValueOrDefault(&quot;model&quot;, &quot;gpt-4&quot;);
-                var temp = context.Variables.GetValueOrDefault(&quot;temperature&quot;, &quot;0.7&quot;);
-                var maxTokens = context.Variables.GetValueOrDefault(&quot;max-tokens&quot;, &quot;800&quot;);
+                var temp = context.Variables.GetValueOrDefault(&quot;temperature&quot;, 0.7f);
+                var maxTokens = context.Variables.GetValueOrDefault(&quot;max-tokens&quot;, 800);
                 return $&quot;Model: {model}, Temp: {temp}, MaxTokens: {maxTokens}, TTL: 2hrs&quot;;
             }</value>
         </set-header>
