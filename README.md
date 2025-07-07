@@ -214,7 +214,7 @@ graph TB
    ├── Cache instance location: North Central US  
    ├── Use from: North Central US (managed)
    ├── Description: redis-testing01.northcentralus.redis.azure.net
-   └── Connection string: redis-testing01.northcentralus.redis.azure.net:undefined,password=RAp5170oGaKBbivfAN2mLZWpDlrgiFcVtAzCaGaKMCM=,ssl=True,abortConnect=False
+   └── Connection string: redis-testing01.northcentralus.redis.azure.net:undefined,password=TU_PASSWORD_AQUI,ssl=True,abortConnect=False
    ```
 
 2. **Verificar la conexión**:
@@ -226,7 +226,7 @@ graph TB
 1. **En Azure Portal → API Management → APIs**:
    ```
    + Add API → Create from Azure resource → Azure AI Foundry
-   ├── Display name: AOAI [Your API Name]
+   ├── Display name: AOAI
    ├── Name: aoai
    ├── AI service: Selecciona tu recurso Azure AI Foundry
    ├── API URL suffix: aoai/models
@@ -607,32 +607,99 @@ graph TB
 
 ## ⚙️ Configuración Avanzada de Redis
 
-### Optimización de Performance
+### Acceso a Redis CLI
 
-Una vez configurado el External Cache, puedes optimizar la configuración de Redis:
+La documentación oficial indica que hay varias formas de conectarse a Azure Cache for Redis:
 
-1. **Configurar TTL por defecto en Redis**:
+#### **Opción 1: Redis Console (Solo Basic, Standard, Premium)**
+Redis Console está disponible solo para los tiers Basic, Standard, y Premium. Si Redis Console está disponible, puedes usarla seleccionando "Console" en la toolbar superior de tu página Overview del cache en Azure Portal.
+
+**Nota importante**: **Redis Enterprise** (como tu instancia `meli-testing01`) **NO tiene Redis Console** disponible en el portal.
+
+#### **Opción 2: Redis-CLI desde línea de comandos**
+
+**Para tu instancia Redis Enterprise:**
+
+1. **Instalar redis-cli en Ubuntu/Cloud Shell**:
    ```bash
-   # Conectarse a Redis CLI
-   redis-cli -h redis-testing01.northcentralus.redis.azure.net -p 6380 -a RAp5170oGaKBbivfAN2mLZWpDlrgiFcVtAzCaGaKMCM --tls
+   sudo apt-get update
+   sudo apt-get install redis-tools
+   ```
+
+2. **Conectarse a tu Redis Enterprise con TLS**:
+   ```bash
+   redis-cli -p 10000 -h redis-testing01.northcentralus.redis.azure.net -a TU_PASSWORD_AQUI --tls
+   ```
+
+3. **Comandos de verificación una vez conectado**:
+   ```redis
+   # Probar conexión
+   PING
+   # Respuesta esperada: PONG
    
-   # Configurar TTL por defecto
-   CONFIG SET timeout 7200  # 2 horas por defecto
+   # Ver información del servidor
+   INFO memory
+   INFO clients
+   
+   # Verificar módulos Redis Enterprise
+   MODULE LIST
+   
+   # Configurar una clave de prueba
+   SET test:cache "API Management Cache Test"
+   GET test:cache
+   
+   # Verificar TTL de configuración
+   CONFIG GET maxmemory-policy
    ```
 
-2. **Configurar Named Values adicionales** (Opcional):
-   ```
-   API Management → Named values → + Add
-   ├── Name: redis-default-ttl
-   ├── Value: 7200
-   ├── Secret: No
-   └── Save
-   ```
+#### **Opción 3: RedisInsight (Recomendado para Redis Enterprise)**
+RedisInsight es una herramienta gráfica open-source rica para emitir comandos Redis y ver el contenido de una instancia Redis. RedisInsight funciona con Azure Cache for Redis y está soportado en Linux, Windows, y macOS.
 
-3. **Monitoreo de Redis**:
-   - Habilitar métricas en Azure Portal
-   - Configurar alertas para memoria y conexiones
-   - Revisar logs de conexión regularmente
+**Instalación y conexión**:
+1. Descargar desde: https://redis.io/insight/
+2. Configurar conexión:
+   - **Host**: `redis-testing01.northcentralus.redis.azure.net`
+   - **Port**: `10000`
+   - **Password**: `TU_PASSWORD_AQUI`
+   - **TLS**: Habilitado
+
+### Comandos de Optimización para APIM Cache
+
+Una vez conectado, configura parámetros específicos para el caché de APIM:
+
+```redis
+# Configurar política de memoria para caché
+CONFIG SET maxmemory-policy allkeys-lru
+
+# Verificar configuración actual
+CONFIG GET maxmemory
+CONFIG GET maxmemory-policy
+
+# Configurar timeout para conexiones inactivas
+CONFIG SET timeout 300
+
+# Habilitar notificaciones de eventos (opcional)
+CONFIG SET notify-keyspace-events Ex
+```
+
+### Configurar Named Values adicionales
+
+```
+API Management → Named values → + Add
+├── Name: redis-enterprise-endpoint
+├── Value: redis-testing01.northcentralus.redis.azure.net:10000
+├── Secret: No
+└── Save
+```
+
+### Monitoreo de Redis Enterprise
+
+- **Métricas disponibles**: Usar Azure Monitor para CPU, memoria, conexiones
+- **Alertas recomendadas**: 
+  - Memoria > 80%
+  - Conexiones activas > 1000
+  - Latencia > 10ms
+- **Logs**: Habilitar diagnostic settings para análisis detallado
 
 ## 🧪 Validación y Testing
 
