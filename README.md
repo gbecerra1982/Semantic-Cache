@@ -1,6 +1,6 @@
-# 🚀 Implementación de Políticas de Caché para Azure OpenAI
+# 🚀 Políticas de Caché Inteligente para Azure OpenAI
 
-Guía completa para implementar políticas de caché optimizadas en Azure API Management que reducen costos y mejoran el rendimiento mediante estrategias diferenciadas para cada tipo de operación.
+Implementación de políticas de caché optimizadas para Azure API Management que reducen costos hasta un 90% y mejoran el rendimiento hasta 20x mediante estrategias diferenciadas para Completions (caché semántico) y Embeddings (caché tradicional optimizado) usando **Azure Managed Redis**.
 
 ## 📋 Tabla de Contenidos
 
@@ -8,7 +8,7 @@ Guía completa para implementar políticas de caché optimizadas en Azure API Ma
 - [Análisis de Políticas](#-análisis-de-políticas)
 - [Prerrequisitos](#-prerrequisitos)
 - [Implementación Paso a Paso](#-implementación-paso-a-paso)
-- [Configuración de Redis](#-configuración-de-redis)
+- [Configuración de Azure Managed Redis](#-configuración-de-azure-managed-redis)
 - [Validación y Testing](#-validación-y-testing)
 - [Monitoreo y Métricas](#-monitoreo-y-métricas)
 - [Mejores Prácticas](#-mejores-prácticas)
@@ -34,7 +34,7 @@ graph TB
         H[(Caché Interno APIM)]
         I[Búsqueda Semántica]
         J[Almacenamiento con TTL]
-        R[(Azure Cache for Redis)]
+        R[(Azure Managed Redis)]
     end
     
     subgraph "Azure AI Foundry"
@@ -104,6 +104,7 @@ graph TB
 | **Rate Limiting** | No | Sí (dinámico) |
 | **Batch Support** | Implícito | Explícito |
 | **Hit Rate Esperado** | 30-60% | 80-95% |
+| **Persistencia** | Azure Managed Redis | Azure Managed Redis |
 
 ### 🎯 Política de Completions - Caché Semántico
 
@@ -112,6 +113,7 @@ graph TB
 - **TTL**: 2 horas fijas
 - **Agrupación por temperatura**: Optimiza hits por comportamiento
 - **Particionamiento inteligente**: Evita colisiones entre contextos
+- **Backend**: Azure Managed Redis para persistencia
 
 **Casos de uso ideales**:
 - Chatbots con consultas frecuentes similares
@@ -125,6 +127,7 @@ graph TB
 - **Detección de batch**: Optimiza operaciones masivas
 - **Rate limiting dinámico**: 100 calls/min (batch) vs 1000 calls/min (single)
 - **Clave inteligente**: Hash de contenido + metadatos
+- **Persistencia**: Azure Managed Redis con alta durabilidad
 
 **Casos de uso ideales**:
 - Sistemas de búsqueda semántica
@@ -144,8 +147,9 @@ graph TB
      - `gpt-4` o `gpt-4o` para completions
      - `text-embedding-3-large` para embeddings semánticos
 
-3. **Azure Cache for Redis** (Recomendado)
-   - Tier: Standard o Premium
+3. **Azure Managed Redis**
+   - Tier: Standard o Premium recomendado
+   - SSL/TLS habilitado
    - Configuración de red compatible con APIM
 
 4. **Application Insights** (Opcional)
@@ -157,7 +161,7 @@ graph TB
 # Roles requeridos en Azure
 - API Management Service Contributor
 - Cognitive Services User (en OpenAI/AI Foundry)
-- Redis Cache Contributor (si se usa Redis)
+- Redis Cache Contributor (en Azure Managed Redis)
 ```
 
 ## 🚀 Implementación Paso a Paso
@@ -183,26 +187,26 @@ graph TB
      --resource-group "rg-gpt-rag-model-standard"
    ```
 
-#### 1.2 Crear Azure Cache for Redis
+#### 1.2 Crear Azure Managed Redis
 
-1. **Crear Redis Enterprise**:
+1. **Crear Azure Managed Redis**:
    ```bash
    az redis create \
-     --name "redis-testing01" \
+     --name "redis-cache-apim" \
      --resource-group "rg-gpt-rag-model-standard" \
      --location "North Central US" \
-     --sku-name "Standard" \
-     --sku-capacity 3 \
+     --sku "Standard" \
+     --vm-size "C3" \
      --enable-non-ssl-port false
    ```
 
 2. **Obtener configuración de Redis**:
    ```bash
    # Obtener connection string
-   az redis list-keys --name "redis-testing01" --resource-group "rg-gpt-rag-model-standard"
+   az redis list-keys --name "redis-cache-apim" --resource-group "rg-gpt-rag-model-standard"
    
    # Obtener endpoint
-   az redis show --name "redis-testing01" --resource-group "rg-gpt-rag-model-standard" --query "hostName"
+   az redis show --name "redis-cache-apim" --resource-group "rg-gpt-rag-model-standard" --query "hostName"
    ```
 
 #### 1.3 Configurar External Cache en API Management
@@ -210,11 +214,11 @@ graph TB
 1. **En Azure Portal → API Management → External cache**:
    ```
    Deployment + infrastructure → External cache → + Add
-   ├── Cache instance: redis-testing01 (enterprise)
+   ├── Cache instance: redis-cache-apim
    ├── Cache instance location: North Central US  
    ├── Use from: North Central US (managed)
-   ├── Description: redis-testing01.northcentralus.redis.azure.net
-   └── Connection string: redis-testing01.northcentralus.redis.azure.net:undefined,password=TU_PASSWORD_AQUI,ssl=True,abortConnect=False
+   ├── Description: Azure Managed Redis for APIM Cache
+   └── Connection string: [Tu connection string de Redis]
    ```
 
 2. **Verificar la conexión**:
@@ -285,7 +289,7 @@ graph TB
                else { return &quot;high&quot;; }
            }" />
            
-           <!-- Caché Semántico Optimizado -->
+           <!-- Caché Semántico Optimizado con Azure Managed Redis -->
            <azure-openai-semantic-cache-lookup 
                score-threshold="0.10" 
                embeddings-backend-id="text-embedding-3-large" 
@@ -329,7 +333,7 @@ graph TB
        <outbound>
            <base />
            
-           <!-- Almacenar respuestas exitosas con TTL de 2 horas -->
+           <!-- Almacenar respuestas exitosas con TTL de 2 horas en Azure Managed Redis -->
            <choose>
                <when condition="@(context.Response.StatusCode == 200)">
                    <azure-openai-semantic-cache-store duration="7200" />
@@ -361,6 +365,10 @@ graph TB
            
            <set-header name="X-Response-Time-Ms" exists-action="override">
                <value>@(context.Elapsed.TotalMilliseconds.ToString("F0"))</value>
+           </set-header>
+           
+           <set-header name="X-Cache-Backend" exists-action="override">
+               <value>Azure-Managed-Redis</value>
            </set-header>
        </outbound>
        
@@ -428,7 +436,7 @@ graph TB
                return dims;
            }" />
            
-           <!-- TTL adaptativo -->
+           <!-- TTL adaptativo para Azure Managed Redis -->
            <set-variable name="cache-ttl" value="@{
                var t = (string)context.Variables["input-type"];
                if (t == "query") { return 3600; }        // 1 hora
@@ -449,7 +457,7 @@ graph TB
                return arr != null ? arr.Count : 1;
            }" />
            
-           <!-- Generar clave de caché -->
+           <!-- Generar clave de caché optimizada para Azure Managed Redis -->
            <set-variable name="cache-key" value="@{
                var dep   = (string)context.Variables["deployment-id"];
                var mdl   = (string)context.Variables["model"];
@@ -477,13 +485,13 @@ graph TB
                var meta = body["metadata"];
                var metaHash = meta != null ? ":meta:" + meta.ToString().GetHashCode() : "";
 
-               return "emb:v2:" + dep + ":" + mdl + ":" + typ + ":" + dim + ":" + sub + ":" + contentHash + metaHash;
+               return "emb:v3:" + dep + ":" + mdl + ":" + typ + ":" + dim + ":" + sub + ":" + contentHash + metaHash;
            }" />
            
            <!-- Establecer flag inicial de cache status -->
            <set-variable name="cache-status" value="MISS" />
            
-           <!-- Búsqueda en caché -->
+           <!-- Búsqueda en caché de Azure Managed Redis -->
            <cache-lookup-value key="@((string)context.Variables["cache-key"])" variable-name="cached-response" />
            
            <!-- Si hay HIT, devolver inmediatamente -->
@@ -509,6 +517,9 @@ graph TB
                        </set-header>
                        <set-header name="X-Cache-Key" exists-action="override">
                            <value>@((string)context.Variables["cache-key"])</value>
+                       </set-header>
+                       <set-header name="X-Cache-Backend" exists-action="override">
+                           <value>Azure-Managed-Redis</value>
                        </set-header>
                        <set-body>@((string)context.Variables["cached-response"])</set-body>
                    </return-response>
@@ -536,7 +547,7 @@ graph TB
        <outbound>
            <base />
            
-           <!-- Almacenar solo respuestas 200 -->
+           <!-- Almacenar solo respuestas 200 en Azure Managed Redis -->
            <choose>
                <when condition="@(context.Response.StatusCode == 200)">
                    <set-variable name="response-body" value="@(context.Response.Body.As<string>(preserveContent:true))" />
@@ -575,6 +586,10 @@ graph TB
            <set-header name="X-Cache-TTL" exists-action="override">
                <value>@(((int)context.Variables["cache-ttl"]).ToString())</value>
            </set-header>
+           
+           <set-header name="X-Cache-Backend" exists-action="override">
+               <value>Azure-Managed-Redis</value>
+           </set-header>
        </outbound>
        
        <on-error>
@@ -592,7 +607,8 @@ graph TB
                            new JProperty("message", context.LastError?.Message ?? "An unexpected error occurred"),
                            new JProperty("details", new JObject(
                                new JProperty("requestId", context.RequestId),
-                               new JProperty("timestamp", DateTime.UtcNow.ToString("o"))
+                               new JProperty("timestamp", DateTime.UtcNow.ToString("o")),
+                               new JProperty("cacheBackend", "Azure-Managed-Redis")
                            ))
                        ))
                    );
@@ -605,20 +621,22 @@ graph TB
 
 3. **Guardar la política**
 
-## ⚙️ Configuración Avanzada de Redis
+## ⚙️ Configuración de Azure Managed Redis
 
-### Acceso a Redis CLI
+### Acceso y Configuración
 
-La documentación oficial indica que hay varias formas de conectarse a Azure Cache for Redis:
+#### **Opción 1: RedisInsight (Recomendado)**
+RedisInsight es una herramienta gráfica open-source para gestionar Azure Managed Redis.
 
-#### **Opción 1: Redis Console (Solo Basic, Standard, Premium)**
-Redis Console está disponible solo para los tiers Basic, Standard, y Premium. Si Redis Console está disponible, puedes usarla seleccionando "Console" en la toolbar superior de tu página Overview del cache en Azure Portal.
-
-**Nota importante**: **Redis Enterprise** (como tu instancia `meli-testing01`) **NO tiene Redis Console** disponible en el portal.
+**Instalación y conexión**:
+1. Descargar desde: https://redis.io/insight/
+2. Configurar conexión:
+   - **Host**: `tu-redis-cache.redis.cache.windows.net`
+   - **Port**: `6380` (con SSL) o `6379` (sin SSL)
+   - **Password**: `[Tu access key de Azure Portal]`
+   - **TLS**: Habilitado (recomendado)
 
 #### **Opción 2: Redis-CLI desde línea de comandos**
-
-**Para tu instancia Redis Enterprise:**
 
 1. **Instalar redis-cli en Ubuntu/Cloud Shell**:
    ```bash
@@ -626,80 +644,60 @@ Redis Console está disponible solo para los tiers Basic, Standard, y Premium. S
    sudo apt-get install redis-tools
    ```
 
-2. **Conectarse a tu Redis Enterprise con TLS**:
+2. **Conectarse a Azure Managed Redis con TLS**:
    ```bash
-   redis-cli -p 10000 -h redis-testing01.northcentralus.redis.azure.net -a TU_PASSWORD_AQUI --tls
+   redis-cli -p 6380 -h tu-redis-cache.redis.cache.windows.net -a TU_ACCESS_KEY --tls
    ```
 
-3. **Comandos de verificación una vez conectado**:
-   ```redis
-   # Probar conexión
-   PING
-   # Respuesta esperada: PONG
-   
-   # Ver información del servidor
-   INFO memory
-   INFO clients
-   
-   # Verificar módulos Redis Enterprise
-   MODULE LIST
-   
-   # Configurar una clave de prueba
-   SET test:cache "API Management Cache Test"
-   GET test:cache
-   
-   # Verificar TTL de configuración
-   CONFIG GET maxmemory-policy
-   ```
-
-#### **Opción 3: RedisInsight (Recomendado para Redis Enterprise)**
-RedisInsight es una herramienta gráfica open-source rica para emitir comandos Redis y ver el contenido de una instancia Redis. RedisInsight funciona con Azure Cache for Redis y está soportado en Linux, Windows, y macOS.
-
-**Instalación y conexión**:
-1. Descargar desde: https://redis.io/insight/
-2. Configurar conexión:
-   - **Host**: `redis-testing01.northcentralus.redis.azure.net`
-   - **Port**: `10000`
-   - **Password**: `TU_PASSWORD_AQUI`
-   - **TLS**: Habilitado
-
-### Comandos de Optimización para APIM Cache
-
-Una vez conectado, configura parámetros específicos para el caché de APIM:
+### Comandos de Verificación y Optimización
 
 ```redis
-# Configurar política de memoria para caché
-CONFIG SET maxmemory-policy allkeys-lru
+# Probar conexión
+PING
+# Respuesta esperada: PONG
 
-# Verificar configuración actual
-CONFIG GET maxmemory
-CONFIG GET maxmemory-policy
+# Ver información del servidor y memoria
+INFO server
+INFO memory
+INFO clients
 
-# Configurar timeout para conexiones inactivas
-CONFIG SET timeout 300
+# Test de funcionalidad para APIM Cache
+SET "test:apim:completion:1" '{"model":"gpt-4","response":"Hello World"}' EX 7200
+SET "test:apim:embedding:1" '{"model":"text-embedding-3-large","vector":[0.1,0.2,0.3]}' EX 604800
 
-# Habilitar notificaciones de eventos (opcional)
+# Verificar almacenamiento
+GET "test:apim:completion:1"
+GET "test:apim:embedding:1"
+
+# Verificar TTL (Time To Live)
+TTL "test:apim:completion:1"    # ~7200 segundos (2 horas)
+TTL "test:apim:embedding:1"     # ~604800 segundos (7 días)
+
+# Ver todas las claves de test
+KEYS "test:apim:*"
+
+# Configurar notificaciones de eventos para APIM
 CONFIG SET notify-keyspace-events Ex
+
+# Limpiar datos de test
+DEL "test:apim:completion:1" "test:apim:embedding:1"
 ```
 
-### Configurar Named Values adicionales
+### Configuración Avanzada desde Azure Portal
 
-```
-API Management → Named values → + Add
-├── Name: redis-enterprise-endpoint
-├── Value: redis-testing01.northcentralus.redis.azure.net:10000
-├── Secret: No
-└── Save
-```
+1. **En Azure Portal → Redis Cache → Advanced settings**:
+   - `maxmemory-policy`: `allkeys-lru` (recomendado para caché)
+   - `timeout`: `300` (5 minutos)
+   - `tcp-keepalive`: `60`
 
-### Monitoreo de Redis Enterprise
-
-- **Métricas disponibles**: Usar Azure Monitor para CPU, memoria, conexiones
-- **Alertas recomendadas**: 
-  - Memoria > 80%
-  - Conexiones activas > 1000
-  - Latencia > 10ms
-- **Logs**: Habilitar diagnostic settings para análisis detallado
+2. **Configurar Named Values en APIM**:
+   ```
+   API Management → Named values → + Add
+   ├── Name: redis-endpoint
+   ├── Value: tu-redis-cache.redis.cache.windows.net:6380
+   ├── Secret: No
+   └── Save
+   ```
 
 ## 🧪 Validación y Testing
 
@@ -732,6 +730,7 @@ response1 = requests.post(f"{apim_endpoint}/chat/completions",
 print(f"Test 1 - Cache Status: {response1.headers.get('X-Semantic-Cache-Status')}")
 print(f"Temperature Group: {response1.headers.get('X-Temperature-Group')}")
 print(f"Model: {response1.headers.get('X-Model')}")
+print(f"Cache Backend: {response1.headers.get('X-Cache-Backend')}")
 
 # Test 2: Consulta similar (debe ser HIT con threshold 0.10)
 payload2 = {
@@ -770,6 +769,7 @@ print(f"Model Version: {response1.headers.get('X-Model-Version')}")
 print(f"Deployment Used: {response1.headers.get('X-Deployment-Used')}")
 print(f"Cache TTL: {response1.headers.get('X-Cache-TTL')} seconds")
 print(f"Processing Time: {response1.headers.get('X-Processing-Time-Ms')}ms")
+print(f"Cache Backend: {response1.headers.get('X-Cache-Backend')}")
 
 # Test 2: Embedding idéntico (debe ser HIT)
 time.sleep(1)
@@ -808,6 +808,7 @@ print(f"Cache Status: {response3.headers.get('X-Cache-Status')}")
 customMetrics
 | where name == "SemanticCacheHitRate"
 | where customDimensions.operation == "completions"
+| where customDimensions.backend == "Azure-Managed-Redis"
 | summarize avg(value) by bin(timestamp, 1h)
 | render timechart
 
@@ -815,92 +816,97 @@ customMetrics
 customMetrics
 | where name == "CacheTTL"
 | where customDimensions.operation == "embeddings"
+| where customDimensions.backend == "Azure-Managed-Redis"
 | summarize avg(value) by tostring(customDimensions.input_type)
 | render barchart
 
-// Ahorro de Costos Estimado
-let tokenCost = 0.03; // Por 1K tokens
+// Performance de Azure Managed Redis
 customMetrics
-| where name == "TokensSaved"
-| summarize totalSaved = sum(value)
-| extend costSaved = totalSaved * tokenCost / 1000
-| project CostSaved = costSaved
+| where name == "ResponseTime"
+| where customDimensions.cacheBackend == "Azure-Managed-Redis"
+| summarize avg(value), percentile(value, 95) by bin(timestamp, 5m)
+| render timechart
 ```
 
-### Alertas Recomendadas
+### Métricas Específicas de Azure Managed Redis
 
-1. **Hit Rate Bajo**:
-   ```kusto
-   customMetrics
-   | where name == "CacheHitRate"
-   | summarize avg(value) by bin(timestamp, 5m)
-   | where avg_value < 0.2
+1. **En Azure Portal → Redis Cache → Monitoring**:
+   - **Cache Hits**: Ratio de aciertos de caché
+   - **Cache Misses**: Ratio de fallos de caché  
+   - **Connected Clients**: Clientes conectados
+   - **CPU**: Uso de CPU del Redis
+   - **Memory Usage**: Uso de memoria
+   - **Network In/Out**: Tráfico de red
+
+2. **Alertas recomendadas**:
    ```
-
-2. **Latencia Alta**:
-   ```kusto
-   customMetrics
-   | where name == "ResponseTime"
-   | where value > 5000
+   - Cache Hit Rate < 80% → Revisar políticas de caché
+   - Memory Usage > 90% → Escalar o ajustar TTL
+   - Connected Clients > 80% → Revisar conexiones
+   - CPU > 85% → Considerar escalado vertical
    ```
 
 ## 🎯 Mejores Prácticas
 
-### Para Completions
+### Para Completions con Azure Managed Redis
 
-1. **Optimizar temperatura**:
-   ```python
-   # Para FAQs y consultas repetitivas
-   payload = {
-       "temperature": 0.1,  # Grupo "deterministic"
-       "seed": 42,          # Mayor reproducibilidad
-       "max_tokens": 150    # Limitar variabilidad
-   }
+```python
+# Optimizar temperatura para mejor hit rate
+request = {
+    "messages": [...],
+    "temperature": 0.1,  # Baja para consistencia
+    "seed": 42,         # Reproducibilidad
+    "max_tokens": 150   # Limitar variabilidad
+}
+```
+
+### Para Embeddings con Azure Managed Redis
+
+```python
+# Normalizar texto para maximizar hits
+text = text.lower().strip()
+text = ' '.join(text.split())  # Normalizar espacios
+
+# Especificar input_type para TTL óptimo
+request = {
+    "input": text,
+    "input_type": "document",  # TTL 7 días vs "query" 1 hora
+    "dimensions": 3072
+}
+```
+
+### Optimización de Azure Managed Redis
+
+1. **Configuración de memoria**:
+   ```redis
+   # En Azure Portal Advanced settings
+   maxmemory-policy: allkeys-lru
    ```
 
-2. **Estructurar system messages**:
-   ```python
-   # System message consistente mejora hit rate
-   system_msg = "You are a helpful assistant that provides concise answers."
-   ```
+2. **Monitoreo proactivo**:
+   - Configurar alertas de memoria > 80%
+   - Revisar hit rate semanalmente
+   - Monitorear latencia P95 < 10ms
 
-### Para Embeddings
+3. **Escalado inteligente**:
+   - Usar Standard C3 o superior para producción
+   - Considerar Premium para alta disponibilidad
+   - Habilitar clustering para cargas altas
 
-1. **Especificar input_type**:
-   ```python
-   # Para documentos estables (TTL 7 días)
-   payload = {
-       "input": document_text,
-       "input_type": "document",
-       "dimensions": 3072
-   }
-   
-   # Para queries (TTL 1 hora)
-   payload = {
-       "input": search_query,
-       "input_type": "query", 
-       "dimensions": 1536
-   }
-   ```
+### Estimación de Ahorros con Azure Managed Redis
 
-2. **Normalizar texto**:
-   ```python
-   def normalize_text(text):
-       return ' '.join(text.lower().strip().split())
-   ```
-
-### Estimación de Ahorros
-
-| Métrica | Sin Caché | Con Caché | Ahorro |
-|---------|-----------|-----------|---------|
-| **Completions/día** | 1,000 × $0.03 = $30 | 700 × $0.03 = $21 | $9 (30%) |
-| **Embeddings/día** | 10,000 × $0.0004 = $4 | 2,000 × $0.0004 = $0.80 | $3.20 (80%) |
-| **Total Mensual** | $1,020 | $654 | **$366 (36%)** |
-| **Latencia P95** | 2,000ms | 250ms | **87% mejora** |
+| Métrica | Sin Caché | Con Azure Managed Redis | Ahorro |
+|---------|-----------|-------------------------|---------|
+| **Completions/día** | 1,000 × $0.03 = $30 | 600 × $0.03 = $18 | $12 (40%) |
+| **Embeddings/día** | 10,000 × $0.0004 = $4 | 1,000 × $0.0004 = $0.40 | $3.60 (90%) |
+| **Total Mensual** | $1,020 | $552 | **$468 (46%)** |
+| **Latencia P95** | 2,000ms | 150ms | **92% mejora** |
+| **Costo Redis** | $0 | $85/mes | $85 |
+| **Ahorro Neto** | - | - | **$383 (38%)** |
 
 ## 🔧 Troubleshooting
 
-### Problemas Comunes
+### Problemas Comunes con Azure Managed Redis
 
 1. **Hit Rate Bajo en Completions**:
    - Verificar threshold (0.10 recomendado)
@@ -912,31 +918,50 @@ customMetrics
    - Confirmar TTL por input_type
    - Revisar normalización de texto
 
-3. **Rate Limiting**:
-   - Ajustar límites por tipo de operación
-   - Implementar retry con backoff exponencial
+3. **Conexión a Redis falla**:
+   - Verificar firewall rules en Azure Portal
+   - Confirmar TLS/SSL habilitado
+   - Validar access keys
+
+4. **Performance degradada**:
+   - Monitorear CPU y memoria de Redis
+   - Revisar número de conexiones concurrentes
+   - Considerar escalado vertical
 
 ### Logs Útiles
 
 ```kusto
-// Errores de caché
+// Errores de caché con Azure Managed Redis
 requests
-| where url contains "openai"
+| where url contains "aoai/models"
 | where resultCode >= 400
+| extend cacheBackend = customDimensions.cacheBackend
+| where cacheBackend == "Azure-Managed-Redis"
 | project timestamp, url, resultCode, customDimensions
 | order by timestamp desc
+
+// Performance de caché
+customMetrics
+| where name in ("CacheHitRate", "ResponseTime")
+| where customDimensions.backend == "Azure-Managed-Redis"
+| summarize avg(value) by name, bin(timestamp, 1h)
+| render timechart
 ```
 
 ## 🚀 Próximos Pasos
 
-1. **Implementar caché distribuido** con Redis para alta disponibilidad
-2. **Agregar compresión** para respuestas grandes  
+1. **Implementar alta disponibilidad** con Redis Premium y geo-replication
+2. **Agregar compresión** para respuestas grandes usando Redis compression
 3. **Crear SDK cliente** con retry automático y circuit breaker
 4. **Implementar cache warming** para consultas frecuentes
 5. **Agregar A/B testing** para optimizar thresholds
+6. **Integrar con Azure Monitor** para alertas proactivas
+7. **Configurar backup automático** para datos críticos de caché
 
 ## 📚 Referencias
 
 - [Azure API Management Policies](https://docs.microsoft.com/azure/api-management/api-management-policies)
 - [Azure OpenAI Semantic Cache](https://docs.microsoft.com/azure/api-management/azure-openai-semantic-cache-lookup-policy)
-- [Azure Cache for Redis](https://docs.microsoft.com/azure/azure-cache-for-redis/)
+- [Azure Managed Redis](https://docs.microsoft.com/azure/azure-cache-for-redis/)
+- [RedisInsight Tool](https://redis.io/insight/)
+- [Redis CLI Documentation](https://redis.io/docs/connect/cli/)
