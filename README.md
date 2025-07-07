@@ -1,15 +1,16 @@
-# 🚀 Caché Semántico Optimizado para Azure OpenAI
+# 🚀 Implementación de Políticas de Caché para Azure OpenAI
 
-Implementación de caché semántico inteligente que reduce costos hasta un 90% y mejora el rendimiento hasta 20x mediante Azure API Management y Azure AI Foundry.
+Guía completa para implementar políticas de caché optimizadas en Azure API Management que reducen costos y mejoran el rendimiento mediante estrategias diferenciadas para cada tipo de operación.
 
 ## 📋 Tabla de Contenidos
 
 - [Arquitectura del Sistema](#-arquitectura-del-sistema)
-- [Características Principales](#-características-principales)
-- [Implementación desde Azure AI Foundry](#-implementación-desde-azure-ai-foundry)
-- [Configuración de Políticas](#-configuración-de-políticas)
-- [Scripts de Prueba y Validación](#-scripts-de-prueba-y-validación)
-- [Monitoreo y Optimización](#-monitoreo-y-optimización)
+- [Análisis de Políticas](#-análisis-de-políticas)
+- [Prerrequisitos](#-prerrequisitos)
+- [Implementación Paso a Paso](#-implementación-paso-a-paso)
+- [Configuración de Redis](#-configuración-de-redis)
+- [Validación y Testing](#-validación-y-testing)
+- [Monitoreo y Métricas](#-monitoreo-y-métricas)
 - [Mejores Prácticas](#-mejores-prácticas)
 
 ## 🏗 Arquitectura del Sistema
@@ -23,10 +24,10 @@ graph TB
     
     subgraph "Azure API Management"
         C[API Gateway]
-        D[Política de Caché Semántico]
+        D[Política de Caché Inteligente]
         E{Router por Operación}
-        F[Política Embeddings<br/>Threshold: 0.95]
-        G[Política Completions<br/>Threshold: 0.10]
+        F[Política Embeddings<br/>Caché Tradicional + TTL Adaptativo]
+        G[Política Completions<br/>Caché Semántico + Threshold 0.10]
     end
     
     subgraph "Caché Layer"
@@ -40,7 +41,7 @@ graph TB
         K[AI Foundry Gateway]
         L[Deployment Manager]
         M[text-embedding-3-large]
-        N[GPT-4.1]
+        N[GPT-4/GPT-4o]
     end
     
     subgraph "Métricas"
@@ -56,13 +57,14 @@ graph TB
     E -->|Embeddings| F
     E -->|Chat/Completions| G
     
-    F --> I
+    F --> H
     G --> I
     
-    I -->|Cache Hit| H
+    I -->|Cache Hit Semántico| H
+    H -->|Cache Hit Tradicional| R
     I -->|Cache Miss| K
+    H -->|Cache Miss| K
     
-    H -->|Redis Lookup| R
     R -->|Return Cached| A
     
     K --> L
@@ -80,6 +82,8 @@ graph TB
     
     style C fill:#0078D4,stroke:#fff,stroke-width:2px
     style D fill:#FF6B6B,stroke:#fff,stroke-width:2px
+    style F fill:#51CF66,stroke:#000,stroke-width:2px,color:#000
+    style G fill:#845EF7,stroke:#fff,stroke-width:2px
     style H fill:#51CF66,stroke:#000,stroke-width:2px,color:#000
     style R fill:#DC382D,stroke:#fff,stroke-width:2px
     style K fill:#FFA94D,stroke:#fff,stroke-width:2px
@@ -87,257 +91,235 @@ graph TB
     style N fill:#845EF7,stroke:#fff,stroke-width:2px
 ```
 
-### Flujo de Datos:
+## 🔍 Análisis de Políticas
 
-1. **Cliente** envía request a API Management
-2. **Política de Caché** analiza el tipo de operación
-3. **Búsqueda Semántica** verifica si existe respuesta similar
-4. **Redis Lookup**: Consulta en Azure Cache for Redis (meli-testing01)
-5. **Cache Hit**: Retorna respuesta desde Redis (<50ms)
-6. **Cache Miss**: Forward a Azure AI Foundry
-7. **Almacenamiento**: Guarda respuesta en caché interno y persiste en Redis
-8. **TTL Management**: Redis gestiona expiración automática
+### 📊 Comparación de Estrategias
 
-## ✨ Características Principales
+| Característica | Política Completions | Política Embeddings |
+|----------------|---------------------|-------------------|
+| **Tipo de Caché** | Semántico Azure OpenAI | Tradicional optimizado |
+| **Threshold** | 0.10 (flexible) | N/A (hash exacto) |
+| **TTL** | Fijo 2 horas | Adaptativo 1h - 7 días |
+| **Particionamiento** | 8 dimensiones | 6 dimensiones |
+| **Rate Limiting** | No | Sí (dinámico) |
+| **Batch Support** | Implícito | Explícito |
+| **Hit Rate Esperado** | 30-60% | 80-95% |
 
-### 🎯 Optimizaciones por Tipo de Operación
+### 🎯 Política de Completions - Caché Semántico
 
-| Operación | Score Threshold | TTL | Particionamiento | Beneficio |
-|-----------|----------------|-----|------------------|-----------|
-| **Embeddings** | 0.95 | 30 días | modelo, tipo, dimensiones, usuario | 95% reducción en latencia |
-| **Chat Completions** | 0.10 | 2 horas | modelo, temperatura, tokens, usuario | 85% reducción en costos |
+**Características principales**:
+- **Score Threshold**: 0.10 - Permite respuestas similares
+- **TTL**: 2 horas fijas
+- **Agrupación por temperatura**: Optimiza hits por comportamiento
+- **Particionamiento inteligente**: Evita colisiones entre contextos
 
-### 💡 Ventajas Clave
+**Casos de uso ideales**:
+- Chatbots con consultas frecuentes similares
+- APIs de Q&A con variaciones mínimas
+- Sistemas con baja temperatura (respuestas consistentes)
 
-- **Reducción de Costos**: Evita llamadas redundantes a modelos costosos
-- **Mejora de Latencia**: Respuestas instantáneas desde caché
-- **Escalabilidad**: Maneja picos de tráfico sin impactar el backend
-- **Inteligencia**: Detecta consultas semánticamente similares
+### 🎯 Política de Embeddings - Caché Tradicional Optimizado
 
-## 🔧 Implementación desde Azure AI Foundry
+**Características principales**:
+- **TTL Adaptativo**: 1 hora (queries) a 7 días (documentos)
+- **Detección de batch**: Optimiza operaciones masivas
+- **Rate limiting dinámico**: 100 calls/min (batch) vs 1000 calls/min (single)
+- **Clave inteligente**: Hash de contenido + metadatos
 
-### 📝 Paso 1: Preparar Azure AI Foundry
+**Casos de uso ideales**:
+- Sistemas de búsqueda semántica
+- Knowledge bases con documentos estables
+- Procesamiento batch de embeddings
 
-**¿Qué hace?**: Configura tu proyecto en AI Foundry con los modelos necesarios.
+## 📋 Prerrequisitos
 
-1. **Accede a Azure AI Foundry Studio**
-   - Ve a [https://ai.azure.com](https://ai.azure.com)
-   - Inicia sesión con tu cuenta Azure
+### 🔧 Infraestructura Requerida
 
-2. **Crea o selecciona un proyecto**
-   ```
-   AI Foundry Studio
-   └── All resources
-       └── + New project
-           ├── Project name: "semantic-cache-project"
-           ├── Hub: Selecciona o crea uno nuevo
-           └── Create
-   ```
+1. **Azure API Management**
+   - Tier: Standard, Premium, o Developer
+   - Managed Identity habilitada
 
-3. **Despliega los modelos necesarios**
-   - En el menú lateral: **Deployments** → **+ Deploy model**
-   - Modelo 1: `gpt-4` (nombre: "gpt-4.1")
-   - Modelo 2: `text-embedding-3-large` (nombre: "text-embedding-3-large")
+2. **Azure OpenAI Service o Azure AI Foundry**
+   - Deployments configurados:
+     - `gpt-4` o `gpt-4o` para completions
+     - `text-embedding-3-large` para embeddings semánticos
 
-### 📝 Paso 2: Importar API de AI Foundry en API Management
+3. **Azure Cache for Redis** (Recomendado)
+   - Tier: Standard o Premium
+   - Configuración de red compatible con APIM
 
-**¿Qué hace?**: Importa la definición de API de Azure AI Foundry para poder aplicar las políticas de caché.
+4. **Application Insights** (Opcional)
+   - Para monitoreo avanzado y métricas
 
-Según la [documentación oficial de Microsoft](https://learn.microsoft.com/en-us/azure/api-management/azure-ai-foundry-api), sigue estos pasos:
+### 🔑 Permisos Necesarios
 
-1. **En Azure Portal, navega a tu API Management**:
-   ```
-   Azure Portal
-   └── API Management services
-       └── tu-instancia-apim
-           └── APIs (menú lateral)
-               └── + Add API
-   ```
+```bash
+# Roles requeridos en Azure
+- API Management Service Contributor
+- Cognitive Services User (en OpenAI/AI Foundry)
+- Redis Cache Contributor (si se usa Redis)
+```
 
-2. **Selecciona "Create from Azure resource"**:
-   - En las opciones que aparecen, busca y selecciona:
-   - **Azure AI Foundry**
-   - Descripción: "Connect API Management services to Azure AI Foundry"
+## 🚀 Implementación Paso a Paso
 
-3. **Configura la conexión con AI Foundry**:
-   - **Subscription**: Tu suscripción de Azure
-   - **Resource**: Selecciona tu proyecto de AI Foundry
-   - **Display name**: `Azure AI Foundry API`
-   - **Name**: `azure-ai-foundry-api`
-   - **API URL suffix**: `ai-foundry`
-   - **Base URL**: Se autocompletará con tu endpoint de AI Foundry
-   - **Products**: Starter, Unlimited (o los que tengas configurados)
-   - **Gateways**: Managed
+### Paso 1: Configurar Infraestructura Base
 
-4. **Configuración de autenticación**:
-   - **Import method**: ✓ Use managed identity
-   - **User assigned managed identity**: Selecciona si tienes una configurada
-   - **Add all AI Foundry operations**: ✓ Marcado
+#### 1.1 Crear Azure API Management
 
-5. **Click "Create"**
-
-**Qué hace automáticamente**:
-- ✅ Importa todas las operaciones de OpenAI (chat, completions, embeddings)
-- ✅ Configura la autenticación con managed identity
-- ✅ Establece el backend correcto de AI Foundry
-- ✅ Mantiene compatibilidad con SDKs de OpenAI
-
-### 📝 Paso 3: Verificar la Importación
-
-**¿Qué hace?**: Confirma que todas las operaciones se importaron correctamente.
-
-1. **En Azure Portal**, navega a tu API Management:
-   ```
-   Azure Portal
-   └── API Management services
-       └── tu-instancia-apim
-           └── APIs
-               └── Azure AI Foundry API
+1. **Crear API Management**:
+   ```bash
+   az apim create \
+     --name "apim0-m5gd7y67cu5b6" \
+     --resource-group "rg-gpt-rag-model-standard" \
+     --publisher-name "Tu Organización" \
+     --publisher-email "admin@tudominio.com" \
+     --sku-name "Standard"
    ```
 
-2. **Verifica las operaciones**:
-   Deberías ver:
-   - `POST /deployments/{deployment-id}/chat/completions`
-   - `POST /deployments/{deployment-id}/completions`
-   - `POST /deployments/{deployment-id}/embeddings`
-   - Otras operaciones de OpenAI
-
-### 📝 Paso 4: Aplicar Política para Embeddings
-
-**¿Qué hace?**: Configura caché semántico optimizado para operaciones de embedding con alta precisión.
-
-1. **Navega a la operación de embeddings**:
-   ```
-   APIs
-   └── Azure AI Foundry API
-       └── All operations (vista de lista)
-           └── Busca: "Creates embeddings" o "/deployments/{deployment-id}/embeddings"
-           └── Click en la operación
+2. **Habilitar Managed Identity**:
+   ```bash
+   az apim identity assign \
+     --name "apim0-m5gd7y67cu5b6" \
+     --resource-group "rg-gpt-rag-model-standard"
    ```
 
-2. **Entra al editor de políticas**:
-   - En la vista de diseño de la operación
-   - En la sección **"Inbound processing"**
-   - Click en el icono **`</>`** (Policy code editor)
+#### 1.2 Crear Azure Cache for Redis
 
-3. **Borra todo el contenido existente y pega la política completa**:
+1. **Crear Redis Enterprise**:
+   ```bash
+   az redis create \
+     --name "redis-testing01" \
+     --resource-group "rg-gpt-rag-model-standard" \
+     --location "North Central US" \
+     --sku-name "Standard" \
+     --sku-capacity 3 \
+     --enable-non-ssl-port false
+   ```
+
+2. **Obtener configuración de Redis**:
+   ```bash
+   # Obtener connection string
+   az redis list-keys --name "redis-testing01" --resource-group "rg-gpt-rag-model-standard"
    
-   **IMPORTANTE**: Copia TODO el contenido del archivo `apim-policy-embeddings-only-v2.xml` que incluye:
+   # Obtener endpoint
+   az redis show --name "redis-testing01" --resource-group "rg-gpt-rag-model-standard" --query "hostName"
+   ```
 
+#### 1.3 Configurar External Cache en API Management
+
+1. **En Azure Portal → API Management → External cache**:
+   ```
+   Deployment + infrastructure → External cache → + Add
+   ├── Cache instance: redis-testing01 (enterprise)
+   ├── Cache instance location: North Central US  
+   ├── Use from: North Central US (managed)
+   ├── Description: redis-testing01.northcentralus.redis.azure.net
+   └── Connection string: redis-testing01.northcentralus.redis.azure.net:undefined,password=RAp5170oGaKBbivfAN2mLZWpDlrgiFcVtAzCaGaKMCM=,ssl=True,abortConnect=False
+   ```
+
+2. **Verificar la conexión**:
+   - El status debe aparecer como "Connected"
+   - Redis debe estar disponible para las políticas de caché
+
+### Paso 2: Importar API de Azure AI Foundry
+
+1. **En Azure Portal → API Management → APIs**:
+   ```
+   + Add API → Create from Azure resource → Azure AI Foundry
+   ├── Display name: AOAI [Your API Name]
+   ├── Name: aoai
+   ├── AI service: Selecciona tu recurso Azure AI Foundry
+   ├── API URL suffix: aoai/models
+   ├── Base URL: https://apim0-m5gd7y67cu5b6.azure-api.net/aoai/models
+   └── Create
+   ```
+
+2. **Verificar operaciones importadas principales**:
+   - `POST` - **Return the embedding vectors for given text prompts**
+   - `POST` - **Gets chat completions for the provided chat messages**
+   - `POST` - Generates an image based on a text or image prompt
+   - `POST` - Return the embedding vectors for given images
+   - `GET` - Returns information about the AI model deployed
+
+### Paso 3: Aplicar Política de Completions
+
+1. **Navegar a la operación**:
+   ```
+   APIs → AOAI → All operations → 
+   "Gets chat completions for the provided chat messages" → Inbound processing
+   ```
+
+2. **Entrar al editor de políticas** (icono `</>`):
+
+3. **Reemplazar todo el contenido con**:
    ```xml
    <policies>
        <inbound>
            <base />
-           
-           <!-- Configurar el backend para embeddings -->
-           <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
            
            <!-- Extraer y validar el request body -->
            <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
            
-           <!-- Extraer parámetros específicos de embeddings -->
-           <set-variable name="input-type" value="@{
-               var body = (JObject)context.Variables[&quot;requestBody&quot;];
-               return body[&quot;input_type&quot;]?.ToString() ?? &quot;query&quot;;
-           }" />
-           
-           <!-- ... resto de la política ... -->
-           
-           <!-- Caché Semántico Optimizado para Embeddings -->
-           <azure-openai-semantic-cache-lookup 
-               score-threshold="0.95"
-               embeddings-backend-id="text-embedding-3-large" 
-               embeddings-backend-auth="system-assigned">
-               <!-- ... configuración de vary-by ... -->
-           </azure-openai-semantic-cache-lookup>
-       </inbound>
-       
-       <backend>
-           <base />
-       </backend>
-       
-       <outbound>
-           <base />
-           <!-- TTL de 30 días para embeddings -->
-           <choose>
-               <when condition="@(context.Response.StatusCode == 200)">
-                   <azure-openai-semantic-cache-store duration="2592000" />
-               </when>
-           </choose>
-           <!-- ... headers de monitoreo ... -->
-       </outbound>
-       
-       <on-error>
-           <base />
-           <!-- ... manejo de errores ... -->
-       </on-error>
-   </policies>
-   ```
-
-4. **Actualiza el backend-id si es necesario**:
-   - Busca: `backend-id="aoai-meli-openai-endpoint"`
-   - Reemplaza con tu backend ID real
-
-5. **Click "Save"**
-
-**Características clave de esta política**:
-- **Score threshold: 0.95** - Solo cachea coincidencias exactas
-- **TTL: 30 días (2592000 segundos)** - Embeddings son determinísticos
-- **Particionamiento avanzado**: 
-  - Por tipo de input (query/document/passage)
-  - Por dimensiones (1536/3072)
-  - Por usuario
-  - Hash exacto del input
-- **Headers de monitoreo**:
-  - `X-Semantic-Cache-Status`: HIT/MISS
-  - `X-Cache-TTL-Days`: 30
-  - `X-Embedding-Type`: query/document/passage
-  - `X-Batch-Size`: Para operaciones batch
-
-### 📝 Paso 5: Aplicar Política para Chat Completions
-
-**¿Qué hace?**: Configura caché semántico flexible para operaciones de chat con threshold bajo.
-
-1. **Navega a la operación de chat completions**:
-   ```
-   APIs
-   └── Azure AI Foundry API
-       └── All operations
-           └── Busca: "Creates a chat completion" o "/deployments/{deployment-id}/chat/completions"
-           └── Click en la operación
-   ```
-
-2. **Entra al editor de políticas**:
-   - Click en **`</>`** en "Inbound processing"
-
-3. **Borra todo y pega el contenido completo de `apim-policy-completions-only-v2.xml`**:
-
-   ```xml
-   <policies>
-       <inbound>
-           <base />
-           
-           <!-- Configurar el backend para completions -->
-           <set-backend-service id="apim-generated-policy" backend-id="aoai-meli-openai-endpoint" />
-           
-           <!-- Extraer parámetros del request -->
-           <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent: true))" />
-           
+           <!-- Extraer parámetros específicos de completions -->
            <set-variable name="temperature" value="@{
                var body = (JObject)context.Variables[&quot;requestBody&quot;];
-               return body[&quot;temperature&quot;]?.Value<float>() ?? 0.7f;
+               return body[&quot;temperature&quot;]?.Value<float>()?? 0.7f;
            }" />
            
-           <!-- ... resto de variables ... -->
+           <set-variable name="max-tokens" value="@{
+               var body = (JObject)context.Variables[&quot;requestBody&quot;];
+               return body[&quot;max_tokens&quot;]?.Value<int>() ?? 800;
+           }" />
            
-           <!-- Caché Semántico para Completions -->
+           <set-variable name="model" value="@{
+               var body = (JObject)context.Variables[&quot;requestBody&quot;];
+               return body[&quot;model&quot;]?.ToString() ?? &quot;gpt-4&quot;;
+           }" />
+           
+           <!-- Determinar el grupo de temperatura -->
+           <set-variable name="temperature-group" value="@{
+               var temp = (float)context.Variables[&quot;temperature&quot;];
+               if (temp <= 0.2) { return &quot;deterministic&quot;; }
+               else if (temp <= 0.5) { return &quot;low&quot;; }
+               else if (temp <= 0.8) { return &quot;medium&quot;; }
+               else { return &quot;high&quot;; }
+           }" />
+           
+           <!-- Caché Semántico Optimizado -->
            <azure-openai-semantic-cache-lookup 
-               score-threshold="0.10"
+               score-threshold="0.10" 
                embeddings-backend-id="text-embedding-3-large" 
                embeddings-backend-auth="system-assigned" 
-               max-message-count="20">
-               <!-- ... configuración de vary-by ... -->
+               max-message-count="20" 
+               ignore-system-messages="false">
+               
+               <!-- Particionamiento por suscripción -->
+               <vary-by>@(context.Subscription?.Id ?? "public")</vary-by>
+               
+               <!-- Particionamiento por modelo -->
+               <vary-by>@(context.Variables.GetValueOrDefault("model", "gpt-4"))</vary-by>
+               
+               <!-- Particionamiento por grupo de temperatura -->
+               <vary-by>@(context.Variables.GetValueOrDefault("temperature-group", "medium"))</vary-by>
+               
+               <!-- Particionamiento por rango de tokens -->
+               <vary-by>@{
+                   var maxTokens = (int)context.Variables["max-tokens"];
+                   if (maxTokens <= 256) { return "tokens-small"; }
+                   else if (maxTokens <= 1024) { return "tokens-medium"; }
+                   else if (maxTokens <= 2048) { return "tokens-large"; }
+                   else { return "tokens-xlarge"; }
+               }</vary-by>
            </azure-openai-semantic-cache-lookup>
+           
+           <!-- Headers de debugging -->
+           <set-header name="X-Temperature-Group" exists-action="override">
+               <value>@(context.Variables.GetValueOrDefault("temperature-group", "medium"))</value>
+           </set-header>
+           
+           <set-header name="X-Model" exists-action="override">
+               <value>@(context.Variables.GetValueOrDefault("model", "gpt-4"))</value>
+           </set-header>
        </inbound>
        
        <backend>
@@ -346,257 +328,548 @@ Según la [documentación oficial de Microsoft](https://learn.microsoft.com/en-u
        
        <outbound>
            <base />
-           <!-- TTL fijo de 2 horas -->
+           
+           <!-- Almacenar respuestas exitosas con TTL de 2 horas -->
            <choose>
                <when condition="@(context.Response.StatusCode == 200)">
                    <azure-openai-semantic-cache-store duration="7200" />
                </when>
            </choose>
-           <!-- ... headers de monitoreo ... -->
+           
+           <!-- Headers de monitoreo -->
+           <set-header name="X-Semantic-Cache-Status" exists-action="override">
+               <value>@{
+                   var status = context.Variables.GetValueOrDefault("semantic-cache-lookup-status", "none");
+                   return status.ToString().ToUpper();
+               }</value>
+           </set-header>
+           
+           <set-header name="X-Semantic-Cache-Score" exists-action="override">
+               <value>@{
+                   var status = context.Variables.GetValueOrDefault("semantic-cache-lookup-status", "none");
+                   if (status.ToString().ToLower() == "hit") {
+                       var score = context.Variables.GetValueOrDefault("semantic-cache-lookup-score", "0");
+                       return score.ToString();
+                   }
+                   return "N/A";
+               }</value>
+           </set-header>
+           
+           <set-header name="X-Cache-TTL-Hours" exists-action="override">
+               <value>2</value>
+           </set-header>
+           
+           <set-header name="X-Response-Time-Ms" exists-action="override">
+               <value>@(context.Elapsed.TotalMilliseconds.ToString("F0"))</value>
+           </set-header>
        </outbound>
        
        <on-error>
            <base />
+           
+           <set-header name="X-Error-Message" exists-action="override">
+               <value>@(context.LastError?.Message ?? "Unknown error")</value>
+           </set-header>
+           
+           <set-header name="X-Error-Model" exists-action="override">
+               <value>@(context.Variables.GetValueOrDefault("model", "unknown"))</value>
+           </set-header>
        </on-error>
    </policies>
    ```
 
-4. **Actualiza el backend-id**
+4. **Guardar la política**
 
-5. **Click "Save"**
+### Paso 4: Aplicar Política de Embeddings
 
-**Características clave de esta política**:
-- **Score threshold: 0.10** - Permite consultas similares
-- **TTL: 2 horas (7200 segundos)** - Balance frescura/eficiencia
-- **Particionamiento inteligente**:
-  - Por grupo de temperatura (deterministic/low/medium/high)
-  - Por rango de max_tokens
-  - Por usuario
-  - Por system message
-  - Por funciones/herramientas
-- **Headers informativos**:
-  - `X-Temperature-Group`: Clasificación de temperatura
-  - `X-Recommended-TTL-Hours`: TTL sugerido por temperatura
-  - `X-Cache-Optimization-Tip`: Consejos de optimización
-
-### 📝 Paso 5.1: Aplicar Política para Completions (Opcional)
-
-Si también usas el endpoint de completions (no chat):
-
-1. **Navega a**: `/deployments/{deployment-id}/completions`
-2. **Aplica la misma política** de completions
-3. La política detectará automáticamente el tipo de operación
-
-### 📝 Paso 6: Configurar Backend y Seguridad
-
-**¿Qué hace?**: Asegura la conexión entre API Management y AI Foundry.
-
-1. **En Settings de la API**:
+1. **Navegar a la operación de embeddings**:
    ```
-   Web service URL: https://tu-proyecto.openai.azure.com/openai
+   APIs → AOAI → All operations → 
+   "Return the embedding vectors for given text prompts" → Inbound processing
    ```
 
-2. **Configurar Managed Identity**:
-   - API Management → Managed identities → System assigned → Status: On
-   - Copia el Object ID
+2. **Reemplazar con la política de embeddings**:
+   ```xml
+   <policies>
+       <inbound>
+           <base />
+           
+           <!-- Parsear el cuerpo JSON -->
+           <set-variable name="requestBody" value="@(context.Request.Body.As<JObject>(preserveContent:true))" />
+           
+           <!-- Modelo solicitado -->
+           <set-variable name="model" value="@{
+               var body = (JObject)context.Variables["requestBody"];
+               return (string)(body["model"] ?? "text-embedding-3-large");
+           }" />
+           
+           <!-- Deployment real -->
+           <set-variable name="deployment-id" value="@{
+               var m = (string)context.Variables["model"];
+               if (m == "text-embedding-3-small") { return "text-embedding-3-small"; }
+               if (m == "text-embedding-3-large") { return "text-embedding-3-large"; }
+               if (m == "text-embedding-ada-002") { return "text-embedding-3-large"; }
+               return m;
+           }" />
+           
+           <!-- Tipo de input -->
+           <set-variable name="input-type" value="@{
+               var body = (JObject)context.Variables["requestBody"];
+               return (string)(body["input_type"] ?? "query");
+           }" />
+           
+           <!-- Dimensiones -->
+           <set-variable name="dimensions" value="@{
+               var body = (JObject)context.Variables["requestBody"];
+               var dims = (string)body["dimensions"];
+               if (dims == null) {
+                   dims = ((string)context.Variables["model"] == "text-embedding-3-large") ? "3072" : "1536";
+               }
+               return dims;
+           }" />
+           
+           <!-- TTL adaptativo -->
+           <set-variable name="cache-ttl" value="@{
+               var t = (string)context.Variables["input-type"];
+               if (t == "query") { return 3600; }        // 1 hora
+               if (t == "document") { return 604800; }   // 7 días
+               if (t == "passage") { return 259200; }    // 3 días
+               return 86400;                             // 24 horas default
+           }" />
+           
+           <!-- ¿Es batch? -->
+           <set-variable name="is-batch" value="@{
+               var input = ((JObject)context.Variables["requestBody"])["input"];
+               return input != null && input.Type == JTokenType.Array;
+           }" />
+           
+           <!-- Tamaño del batch -->
+           <set-variable name="batch-size" value="@{
+               var arr = ((JObject)context.Variables["requestBody"])["input"] as JArray;
+               return arr != null ? arr.Count : 1;
+           }" />
+           
+           <!-- Generar clave de caché -->
+           <set-variable name="cache-key" value="@{
+               var dep   = (string)context.Variables["deployment-id"];
+               var mdl   = (string)context.Variables["model"];
+               var typ   = (string)context.Variables["input-type"];
+               var dim   = (string)context.Variables["dimensions"];
+               var sub   = context.Subscription?.Id ?? "public";
+               var body  = (JObject)context.Variables["requestBody"];
+               var input = body["input"];
 
-3. **En AI Foundry**, asigna permisos:
-   - Project → Access control (IAM)
-   - Add role assignment → Cognitive Services User
-   - Assign to: Managed identity → Select your APIM
+               string contentHash = "";
+               if (input != null) {
+                   if (input.Type == JTokenType.String) {
+                       contentHash = "single:" + input.ToString().GetHashCode();
+                   }
+                   else if (input.Type == JTokenType.Array) {
+                       var arr = (JArray)input;
+                       var hashes = new System.Text.StringBuilder();
+                       foreach (var itm in arr) {
+                           hashes.Append(itm.ToString().GetHashCode()).Append('|');
+                       }
+                       contentHash = "batch:" + arr.Count + ":" + hashes.ToString().GetHashCode();
+                   }
+               }
 
-### 📝 Paso 7: Crear Subscription Keys
+               var meta = body["metadata"];
+               var metaHash = meta != null ? ":meta:" + meta.ToString().GetHashCode() : "";
 
-**¿Qué hace?**: Genera claves de acceso para tus aplicaciones.
-
-1. **En API Management → Subscriptions**:
+               return "emb:v2:" + dep + ":" + mdl + ":" + typ + ":" + dim + ":" + sub + ":" + contentHash + metaHash;
+           }" />
+           
+           <!-- Establecer flag inicial de cache status -->
+           <set-variable name="cache-status" value="MISS" />
+           
+           <!-- Búsqueda en caché -->
+           <cache-lookup-value key="@((string)context.Variables["cache-key"])" variable-name="cached-response" />
+           
+           <!-- Si hay HIT, devolver inmediatamente -->
+           <choose>
+               <when condition="@(context.Variables.ContainsKey("cached-response") && context.Variables["cached-response"] != null)">
+                   <set-variable name="cache-status" value="HIT" />
+                   <return-response>
+                       <set-status code="200" reason="OK" />
+                       <set-header name="Content-Type" exists-action="override">
+                           <value>application/json</value>
+                       </set-header>
+                       <set-header name="X-Cache-Status" exists-action="override">
+                           <value>HIT</value>
+                       </set-header>
+                       <set-header name="X-Model-Version" exists-action="override">
+                           <value>@((string)context.Variables["model"])</value>
+                       </set-header>
+                       <set-header name="X-Deployment-Used" exists-action="override">
+                           <value>@((string)context.Variables["deployment-id"])</value>
+                       </set-header>
+                       <set-header name="X-Batch-Size" exists-action="override">
+                           <value>@(((int)context.Variables["batch-size"]).ToString())</value>
+                       </set-header>
+                       <set-header name="X-Cache-Key" exists-action="override">
+                           <value>@((string)context.Variables["cache-key"])</value>
+                       </set-header>
+                       <set-body>@((string)context.Variables["cached-response"])</set-body>
+                   </return-response>
+               </when>
+           </choose>
+           
+           <!-- Rate limiting dinámico -->
+           <rate-limit-by-key 
+               calls="@(((bool)context.Variables["is-batch"]) ? 100 : 1000)" 
+               renewal-period="60" 
+               counter-key="@(context.Subscription?.Id ?? context.Request.IpAddress)" />
+           
+           <!-- Identificador de solicitud -->
+           <set-header name="X-Request-ID" exists-action="override">
+               <value>@(Guid.NewGuid().ToString())</value>
+           </set-header>
+       </inbound>
+       
+       <backend>
+           <retry count="3" interval="2" max-interval="10" delta="2" condition="@(context.Response.StatusCode >= 500)">
+               <forward-request buffer-request-body="true" timeout="30" />
+           </retry>
+       </backend>
+       
+       <outbound>
+           <base />
+           
+           <!-- Almacenar solo respuestas 200 -->
+           <choose>
+               <when condition="@(context.Response.StatusCode == 200)">
+                   <set-variable name="response-body" value="@(context.Response.Body.As<string>(preserveContent:true))" />
+                   <cache-store-value 
+                       key="@((string)context.Variables["cache-key"])" 
+                       value="@((string)context.Variables["response-body"])" 
+                       duration="@((int)context.Variables["cache-ttl"])" />
+               </when>
+           </choose>
+           
+           <!-- Headers de diagnóstico -->
+           <set-header name="X-Cache-Status" exists-action="override">
+               <value>@((string)context.Variables["cache-status"])</value>
+           </set-header>
+           
+           <set-header name="X-Model-Version" exists-action="override">
+               <value>@((string)context.Variables["model"])</value>
+           </set-header>
+           
+           <set-header name="X-Deployment-Used" exists-action="override">
+               <value>@((string)context.Variables["deployment-id"])</value>
+           </set-header>
+           
+           <set-header name="X-Batch-Size" exists-action="override">
+               <value>@(((int)context.Variables["batch-size"]).ToString())</value>
+           </set-header>
+           
+           <set-header name="X-Processing-Time-Ms" exists-action="override">
+               <value>@(((int)context.Elapsed.TotalMilliseconds).ToString())</value>
+           </set-header>
+           
+           <set-header name="X-Cache-Key" exists-action="override">
+               <value>@((string)context.Variables["cache-key"])</value>
+           </set-header>
+           
+           <set-header name="X-Cache-TTL" exists-action="override">
+               <value>@(((int)context.Variables["cache-ttl"]).ToString())</value>
+           </set-header>
+       </outbound>
+       
+       <on-error>
+           <base />
+           
+           <return-response>
+               <set-status code="@(context.Response?.StatusCode ?? 500)" reason="@(context.Response?.StatusReason ?? "Internal Server Error")" />
+               <set-header name="Content-Type" exists-action="override">
+                   <value>application/json</value>
+               </set-header>
+               <set-body>@{
+                   var err = new JObject(
+                       new JProperty("error", new JObject(
+                           new JProperty("code",    context.LastError?.Source  ?? "EMBEDDING_ERROR"),
+                           new JProperty("message", context.LastError?.Message ?? "An unexpected error occurred"),
+                           new JProperty("details", new JObject(
+                               new JProperty("requestId", context.RequestId),
+                               new JProperty("timestamp", DateTime.UtcNow.ToString("o"))
+                           ))
+                       ))
+                   );
+                   return err.ToString();
+               }</set-body>
+           </return-response>
+       </on-error>
+   </policies>
    ```
-   + Add subscription
-   ├── Name: production-app
-   ├── Display name: Production Application
-   ├── Scope: Azure AI Foundry API
-   └── Create
+
+3. **Guardar la política**
+
+## ⚙️ Configuración Avanzada de Redis
+
+### Optimización de Performance
+
+Una vez configurado el External Cache, puedes optimizar la configuración de Redis:
+
+1. **Configurar TTL por defecto en Redis**:
+   ```bash
+   # Conectarse a Redis CLI
+   redis-cli -h redis-testing01.northcentralus.redis.azure.net -p 6380 -a RAp5170oGaKBbivfAN2mLZWpDlrgiFcVtAzCaGaKMCM --tls
+   
+   # Configurar TTL por defecto
+   CONFIG SET timeout 7200  # 2 horas por defecto
    ```
 
-2. **Obtén las claves**:
-   - Click en "..." → Show/hide keys
-   - Copia la Primary key
+2. **Configurar Named Values adicionales** (Opcional):
+   ```
+   API Management → Named values → + Add
+   ├── Name: redis-default-ttl
+   ├── Value: 7200
+   ├── Secret: No
+   └── Save
+   ```
 
-## 🧪 Scripts de Prueba y Validación
+3. **Monitoreo de Redis**:
+   - Habilitar métricas en Azure Portal
+   - Configurar alertas para memoria y conexiones
+   - Revisar logs de conexión regularmente
 
-### 🔬 Test 1: Validación de Caché de Embeddings
+## 🧪 Validación y Testing
 
-**Archivo**: `test-embedding-cache.py`
+### Test de Política de Completions
 
-**¿Qué prueba?**
-1. **Exactitud del threshold (0.95)**:
-   - Verifica que solo consultas idénticas generan HIT
-   - Valida que consultas similares generan MISS
+```python
+import requests
+import time
 
-2. **Particionamiento correcto**:
-   - Diferentes `input_type` (query/document/passage)
-   - Diferentes dimensiones (1536/3072)
-   - Diferentes usuarios
+# Configuración
+apim_endpoint = "https://apim0-m5gd7y67cu5b6.azure-api.net/aoai/models"
+subscription_key = "tu-subscription-key"
 
-3. **Batch processing**:
-   - Arrays de inputs
-   - Validación de hash para batches
+headers = {
+    "Ocp-Apim-Subscription-Key": subscription_key,
+    "Content-Type": "application/json"
+}
 
-**Beneficios**:
-- ✅ Confirma configuración correcta del threshold alto
-- ✅ Valida el particionamiento para evitar colisiones
-- ✅ Asegura persistencia de 30 días
+# Test 1: Consulta inicial (debe ser MISS)
+payload1 = {
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "What are Python best practices?"}],
+    "temperature": 0.1,
+    "max_tokens": 150
+}
 
-**Ejecución**:
-```bash
-python test-embedding-cache.py
+response1 = requests.post(f"{apim_endpoint}/chat/completions", 
+                         json=payload1, headers=headers)
 
-# Salida esperada:
-▶ Test 2/10: Consulta idéntica - Debe ser HIT
-Resultado:
-  └─ Cache Status: HIT
-  └─ Cache Score: 1.0
-  └─ TTL (días): 30
-  └─ Tiempo de respuesta: 0.021s
-  └─ Validación: ✓ (Esperado: HIT)
+print(f"Test 1 - Cache Status: {response1.headers.get('X-Semantic-Cache-Status')}")
+print(f"Temperature Group: {response1.headers.get('X-Temperature-Group')}")
+print(f"Model: {response1.headers.get('X-Model')}")
+
+# Test 2: Consulta similar (debe ser HIT con threshold 0.10)
+payload2 = {
+    "model": "gpt-4", 
+    "messages": [{"role": "user", "content": "What are the Python best practices?"}],
+    "temperature": 0.1,
+    "max_tokens": 150
+}
+
+time.sleep(1)  # Esperar propagación de caché
+
+response2 = requests.post(f"{apim_endpoint}/chat/completions", 
+                         json=payload2, headers=headers)
+
+print(f"Test 2 - Cache Status: {response2.headers.get('X-Semantic-Cache-Status')}")
+print(f"Cache Score: {response2.headers.get('X-Semantic-Cache-Score')}")
+print(f"Response Time: {response2.headers.get('X-Response-Time-Ms')}ms")
 ```
 
-### 🔬 Test 2: Validación de Caché de Completions
+### Test de Política de Embeddings
 
-**Archivo**: `test-completions-cache.py`
+```python
+# Test 1: Embedding inicial (debe ser MISS)
+payload1 = {
+    "model": "text-embedding-3-large",
+    "input": "Azure API Management best practices",
+    "input_type": "document",
+    "dimensions": 3072
+}
 
-**¿Qué prueba?**
-1. **Flexibilidad del threshold (0.10)**:
-   - Consultas similares deben generar HIT
-   - "What are Python best practices?" ≈ "What are the Python best practices?"
+response1 = requests.post(f"{apim_endpoint}/embeddings", 
+                         json=payload1, headers=headers)
 
-2. **Grupos de temperatura**:
-   - Determinística (0.0-0.2): Mayor reuso
-   - Baja (0.2-0.5): Reuso moderado
-   - Media (0.5-0.8): Reuso limitado
-   - Alta (0.8+): Mínimo reuso
+print(f"Test 1 - Cache Status: {response1.headers.get('X-Cache-Status')}")
+print(f"Model Version: {response1.headers.get('X-Model-Version')}")
+print(f"Deployment Used: {response1.headers.get('X-Deployment-Used')}")
+print(f"Cache TTL: {response1.headers.get('X-Cache-TTL')} seconds")
+print(f"Processing Time: {response1.headers.get('X-Processing-Time-Ms')}ms")
 
-3. **Parámetros avanzados**:
-   - frequency_penalty y presence_penalty
-   - Conversaciones multi-turno
-   - Funciones/herramientas
+# Test 2: Embedding idéntico (debe ser HIT)
+time.sleep(1)
 
-**Beneficios**:
-- ✅ Maximiza hit rate con threshold bajo
-- ✅ Valida agrupación inteligente por temperatura
-- ✅ Asegura compatibilidad con features avanzadas
+response2 = requests.post(f"{apim_endpoint}/embeddings", 
+                         json=payload1, headers=headers)
 
-**Ejecución**:
-```bash
-python test-completions-cache.py
+print(f"Test 2 - Cache Status: {response2.headers.get('X-Cache-Status')}")
+print(f"Cache Key: {response2.headers.get('X-Cache-Key')}")
 
-# Métricas generadas:
-📊 Estadísticas Generales:
-  └─ Hit Rate: 41.7%
-  └─ Mejora de velocidad: 15.2x
+# Test 3: Batch embedding (validar rate limiting)
+payload3 = {
+    "model": "text-embedding-3-large",
+    "input": [
+        "Azure API Management",
+        "Semantic caching strategies", 
+        "OpenAI embeddings optimization"
+    ],
+    "input_type": "query",
+    "dimensions": 1536
+}
 
-💰 Estimación de Ahorros:
-  └─ Ahorro mensual proyectado: $567.30
+response3 = requests.post(f"{apim_endpoint}/embeddings", 
+                         json=payload3, headers=headers)
+
+print(f"Test 3 - Batch Size: {response3.headers.get('X-Batch-Size')}")
+print(f"Cache Status: {response3.headers.get('X-Cache-Status')}")
 ```
 
-### 🔬 Interpretación de Resultados
+## 📊 Monitoreo y Métricas
 
-**Headers de respuesta clave**:
+### Dashboard de Application Insights
 
-```http
-# Para Embeddings
-X-Semantic-Cache-Status: HIT
-X-Cache-TTL-Days: 30
-X-Batch-Size: 5
-X-Cache-Optimization-Tip: "Document embeddings cached for 30 days"
+```kusto
+// Hit Rate por Hora - Completions
+customMetrics
+| where name == "SemanticCacheHitRate"
+| where customDimensions.operation == "completions"
+| summarize avg(value) by bin(timestamp, 1h)
+| render timechart
 
-# Para Completions  
-X-Semantic-Cache-Status: MISS
-X-Recommended-TTL-Hours: 12
-X-Temperature-Group: deterministic
-X-Cache-Optimization-Tip: "Low temperature - consider longer TTL"
+// TTL Efectivo - Embeddings  
+customMetrics
+| where name == "CacheTTL"
+| where customDimensions.operation == "embeddings"
+| summarize avg(value) by tostring(customDimensions.input_type)
+| render barchart
+
+// Ahorro de Costos Estimado
+let tokenCost = 0.03; // Por 1K tokens
+customMetrics
+| where name == "TokensSaved"
+| summarize totalSaved = sum(value)
+| extend costSaved = totalSaved * tokenCost / 1000
+| project CostSaved = costSaved
 ```
 
-## 📊 Monitoreo y Optimización
-
-### Dashboard Recomendado
-
-1. **Crear dashboard en Azure Portal**:
-   ```
-   Portal → Dashboard → + New dashboard
-   └── Semantic Cache Monitor
-       ├── Hit Rate Chart (Line)
-       ├── Response Time Comparison (Bar)
-       ├── Cost Savings (KPI)
-       └── Top Cached Queries (Table)
-   ```
-
-2. **Queries de Application Insights**:
-   ```kusto
-   // Hit Rate por Hora
-   customMetrics
-   | where name == "CacheHitRate"
-   | summarize avg(value) by bin(timestamp, 1h)
-   | render timechart
-   ```
-
-### Alertas Críticas
+### Alertas Recomendadas
 
 1. **Hit Rate Bajo**:
-   - Condición: Hit Rate < 20%
-   - Acción: Revisar threshold y particionamiento
+   ```kusto
+   customMetrics
+   | where name == "CacheHitRate"
+   | summarize avg(value) by bin(timestamp, 5m)
+   | where avg_value < 0.2
+   ```
 
 2. **Latencia Alta**:
-   - Condición: P95 > 5 segundos
-   - Acción: Verificar backend y caché
+   ```kusto
+   customMetrics
+   | where name == "ResponseTime"
+   | where value > 5000
+   ```
 
 ## 🎯 Mejores Prácticas
 
-### Para Embeddings
-
-```python
-# Normalizar texto para maximizar hits
-text = text.lower().strip()
-text = ' '.join(text.split())  # Normalizar espacios
-
-# Especificar input_type
-request = {
-    "input": text,
-    "input_type": "document",  # Mejora particionamiento
-    "dimensions": 3072
-}
-```
-
 ### Para Completions
 
-```python
-# Para consultas frecuentes (FAQs)
-request = {
-    "messages": [...],
-    "temperature": 0.1,  # Baja para consistencia
-    "seed": 42,         # Reproducibilidad
-    "max_tokens": 150   # Limitar variabilidad
-}
-```
+1. **Optimizar temperatura**:
+   ```python
+   # Para FAQs y consultas repetitivas
+   payload = {
+       "temperature": 0.1,  # Grupo "deterministic"
+       "seed": 42,          # Mayor reproducibilidad
+       "max_tokens": 150    # Limitar variabilidad
+   }
+   ```
 
-### Monitoreo de Costos
+2. **Estructurar system messages**:
+   ```python
+   # System message consistente mejora hit rate
+   system_msg = "You are a helpful assistant that provides concise answers."
+   ```
+
+### Para Embeddings
+
+1. **Especificar input_type**:
+   ```python
+   # Para documentos estables (TTL 7 días)
+   payload = {
+       "input": document_text,
+       "input_type": "document",
+       "dimensions": 3072
+   }
+   
+   # Para queries (TTL 1 hora)
+   payload = {
+       "input": search_query,
+       "input_type": "query", 
+       "dimensions": 1536
+   }
+   ```
+
+2. **Normalizar texto**:
+   ```python
+   def normalize_text(text):
+       return ' '.join(text.lower().strip().split())
+   ```
+
+### Estimación de Ahorros
 
 | Métrica | Sin Caché | Con Caché | Ahorro |
 |---------|-----------|-----------|---------|
-| Embeddings/día | 10,000 × $0.0004 = $4 | 6,000 × $0.0004 = $2.40 | $1.60 (40%) |
-| Completions/día | 1,000 × $0.03 = $30 | 700 × $0.03 = $21 | $9 (30%) |
-| **Total Mensual** | **$1,020** | **$702** | **$318** |
+| **Completions/día** | 1,000 × $0.03 = $30 | 700 × $0.03 = $21 | $9 (30%) |
+| **Embeddings/día** | 10,000 × $0.0004 = $4 | 2,000 × $0.0004 = $0.80 | $3.20 (80%) |
+| **Total Mensual** | $1,020 | $654 | **$366 (36%)** |
+| **Latencia P95** | 2,000ms | 250ms | **87% mejora** |
+
+## 🔧 Troubleshooting
+
+### Problemas Comunes
+
+1. **Hit Rate Bajo en Completions**:
+   - Verificar threshold (0.10 recomendado)
+   - Revisar particionamiento por temperatura
+   - Validar consistencia en system messages
+
+2. **Embeddings no se cachean**:
+   - Verificar generación de cache-key
+   - Confirmar TTL por input_type
+   - Revisar normalización de texto
+
+3. **Rate Limiting**:
+   - Ajustar límites por tipo de operación
+   - Implementar retry con backoff exponencial
+
+### Logs Útiles
+
+```kusto
+// Errores de caché
+requests
+| where url contains "openai"
+| where resultCode >= 400
+| project timestamp, url, resultCode, customDimensions
+| order by timestamp desc
+```
 
 ## 🚀 Próximos Pasos
 
-1. **Implementar Redis Cache** para escalabilidad horizontal
-2. **Agregar compresión** para respuestas grandes
-3. **Crear SDK cliente** con retry automático
-4. **Implementar warming** de caché para consultas comunes
-5. **Agregar versionado** de respuestas cacheadas
+1. **Implementar caché distribuido** con Redis para alta disponibilidad
+2. **Agregar compresión** para respuestas grandes  
+3. **Crear SDK cliente** con retry automático y circuit breaker
+4. **Implementar cache warming** para consultas frecuentes
+5. **Agregar A/B testing** para optimizar thresholds
 
 ## 📚 Referencias
 
-- [Azure AI Foundry + API Management](https://learn.microsoft.com/en-us/azure/api-management/azure-ai-foundry-api)
-- [Semantic Cache Policies](https://learn.microsoft.com/azure/api-management/azure-openai-semantic-cache-lookup-policy)
-- [Azure OpenAI Service](https://learn.microsoft.com/azure/ai-services/openai/)
+- [Azure API Management Policies](https://docs.microsoft.com/azure/api-management/api-management-policies)
+- [Azure OpenAI Semantic Cache](https://docs.microsoft.com/azure/api-management/azure-openai-semantic-cache-lookup-policy)
+- [Azure Cache for Redis](https://docs.microsoft.com/azure/azure-cache-for-redis/)
